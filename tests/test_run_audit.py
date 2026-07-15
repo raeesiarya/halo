@@ -7,35 +7,42 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/lmlm-audit"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-import run_audit
-from run_audit import (
+from lmlm_audit import jobs as jobs_module, reporting
+from lmlm_audit.jobs import (
     AuditJob,
-    AuditLogger,
+    discover_all_audit_jobs,
+    discover_custom_audit_jobs,
+    discover_released_audit_jobs,
+    infer_prompt_paths_for_database,
+    resolve_audit_jobs,
+)
+from lmlm_audit.rel_lmlm import backend as rel_backend
+from lmlm_audit.rel_lmlm.backend import (
     _default_retrieval_trace,
     choose_answer,
     clean_answer,
     compute_generation_budget,
-    discover_all_audit_jobs,
-    discover_custom_audit_jobs,
-    discover_released_audit_jobs,
     extract_lookup_values,
     generate_answer,
-    infer_prompt_paths_for_database,
-    load_prompts,
-    log_metrics_to_wandb,
-    parse_args,
     prepare_prompt,
-    resolve_audit_jobs,
     retrieve_lookup_value,
-    run_audit as run_audit_fn,
-    run_prompt_audit,
+)
+from lmlm_audit.reporting import (
+    AuditLogger,
+    log_metrics_to_wandb,
     save_results,
     setup_wandb,
     write_metrics_csvs,
 )
-from database_states import DatabaseState
+from lmlm_audit.run_audit import parse_args
+from lmlm_audit.runner import (
+    load_prompts,
+    run_audit as run_audit_fn,
+    run_prompt_audit,
+)
+from lmlm_audit.states import DatabaseState
 
 
 
@@ -663,7 +670,7 @@ class TestRunPromptAudit:
     def test_populates_metadata_fields(self, fake_base_manager):
         tok = _make_tokenizer_mock()
         model = _make_model_mock(raw_output="France")
-        with patch.object(run_audit, "build_state_db_manager") as b:
+        with patch.object(rel_backend, "build_state_db_manager") as b:
             db_manager = MagicMock()
             db_manager.last_trace = None
             b.return_value = db_manager
@@ -686,7 +693,7 @@ class TestRunPromptAudit:
     def test_uses_default_trace_when_db_manager_has_none(self, fake_base_manager):
         tok = _make_tokenizer_mock()
         model = _make_model_mock(raw_output="France")
-        with patch.object(run_audit, "build_state_db_manager") as b:
+        with patch.object(rel_backend, "build_state_db_manager") as b:
             db_manager = MagicMock(spec=[])
             b.return_value = db_manager
             result = run_prompt_audit(
@@ -703,7 +710,7 @@ class TestRunPromptAudit:
     def test_resets_trace_when_supported(self, fake_base_manager):
         tok = _make_tokenizer_mock()
         model = _make_model_mock(raw_output="France")
-        with patch.object(run_audit, "build_state_db_manager") as b:
+        with patch.object(rel_backend, "build_state_db_manager") as b:
             db_manager = MagicMock()
             db_manager.last_trace = {"selected_value": "France"}
             b.return_value = db_manager
@@ -744,7 +751,7 @@ class TestRunAuditLoop:
         p = self._write_prompt_jsonl(tmp_path, self._prompt_rows())
         tok = _make_tokenizer_mock()
         model = _make_model_mock(raw_output="answer")
-        with patch.object(run_audit, "build_state_db_manager") as b:
+        with patch.object(rel_backend, "build_state_db_manager") as b:
             b.return_value = MagicMock()
             results = run_audit_fn(
                 prompt_path=p,
@@ -759,7 +766,7 @@ class TestRunAuditLoop:
         p = self._write_prompt_jsonl(tmp_path, self._prompt_rows())
         tok = _make_tokenizer_mock()
         model = _make_model_mock(raw_output="answer")
-        with patch.object(run_audit, "build_state_db_manager") as b:
+        with patch.object(rel_backend, "build_state_db_manager") as b:
             b.return_value = MagicMock()
             results = run_audit_fn(
                 prompt_path=p,
@@ -903,7 +910,7 @@ class TestDiscoverCustomAuditJobs:
                 },
             },
         )
-        monkeypatch.setattr(run_audit, "DEFAULT_CUSTOM_DATABASE_DIR", root)
+        monkeypatch.setattr(jobs_module, "DEFAULT_CUSTOM_DATABASE_DIR", root)
         jobs = discover_custom_audit_jobs(tmp_path / "out")
 
         prompt_names = sorted(j.prompt_path.name for j in jobs)
@@ -914,7 +921,7 @@ class TestDiscoverCustomAuditJobs:
         root = tmp_path / "custom_databases"
         root.mkdir()
         (root / "empty_domain").mkdir()
-        monkeypatch.setattr(run_audit, "DEFAULT_CUSTOM_DATABASE_DIR", root)
+        monkeypatch.setattr(jobs_module, "DEFAULT_CUSTOM_DATABASE_DIR", root)
         assert discover_custom_audit_jobs(tmp_path / "out") == []
 
     def test_skips_variant_without_matching_db_json(self, tmp_path, monkeypatch):
@@ -924,14 +931,14 @@ class TestDiscoverCustomAuditJobs:
         (domain / "prompts" / "missing_db_variant" / "p.jsonl").write_text(
             "", encoding="utf-8"
         )
-        monkeypatch.setattr(run_audit, "DEFAULT_CUSTOM_DATABASE_DIR", root)
+        monkeypatch.setattr(jobs_module, "DEFAULT_CUSTOM_DATABASE_DIR", root)
         assert discover_custom_audit_jobs(tmp_path / "out") == []
 
     def test_ignores_non_directories_at_domain_level(self, tmp_path, monkeypatch):
         root = tmp_path / "custom_databases"
         root.mkdir()
         (root / "stray_file.txt").write_text("ignore me", encoding="utf-8")
-        monkeypatch.setattr(run_audit, "DEFAULT_CUSTOM_DATABASE_DIR", root)
+        monkeypatch.setattr(jobs_module, "DEFAULT_CUSTOM_DATABASE_DIR", root)
         assert discover_custom_audit_jobs(tmp_path / "out") == []
 
 
@@ -948,7 +955,7 @@ class TestDiscoverReleasedAuditJobs:
     def test_discovers_all_prompt_files(self, tmp_path, monkeypatch):
         root = tmp_path / "released_database"
         self._build_released(root, ["prompts_a.jsonl", "prompts_b.jsonl"])
-        monkeypatch.setattr(run_audit, "DEFAULT_RELEASED_DATABASE_DIR", root)
+        monkeypatch.setattr(jobs_module, "DEFAULT_RELEASED_DATABASE_DIR", root)
 
         jobs = discover_released_audit_jobs(tmp_path / "out")
 
@@ -969,7 +976,7 @@ class TestDiscoverReleasedAuditJobs:
 
     def test_returns_empty_when_dir_missing(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
-            run_audit,
+            jobs_module,
             "DEFAULT_RELEASED_DATABASE_DIR",
             tmp_path / "does_not_exist",
         )
@@ -980,14 +987,14 @@ class TestDiscoverReleasedAuditJobs:
         root.mkdir()
         (root / "prompts").mkdir()
         (root / "prompts" / "p.jsonl").write_text("", encoding="utf-8")
-        monkeypatch.setattr(run_audit, "DEFAULT_RELEASED_DATABASE_DIR", root)
+        monkeypatch.setattr(jobs_module, "DEFAULT_RELEASED_DATABASE_DIR", root)
         assert discover_released_audit_jobs(tmp_path / "out") == []
 
     def test_returns_empty_when_prompts_dir_missing(self, tmp_path, monkeypatch):
         root = tmp_path / "released_database"
         root.mkdir()
         (root / "lmlm_database.json").write_text("{}", encoding="utf-8")
-        monkeypatch.setattr(run_audit, "DEFAULT_RELEASED_DATABASE_DIR", root)
+        monkeypatch.setattr(jobs_module, "DEFAULT_RELEASED_DATABASE_DIR", root)
         assert discover_released_audit_jobs(tmp_path / "out") == []
 
 
@@ -1005,8 +1012,8 @@ class TestDiscoverAllAuditJobs:
         (released_root / "prompts").mkdir()
         (released_root / "prompts" / "p2.jsonl").write_text("", encoding="utf-8")
 
-        monkeypatch.setattr(run_audit, "DEFAULT_CUSTOM_DATABASE_DIR", custom_root)
-        monkeypatch.setattr(run_audit, "DEFAULT_RELEASED_DATABASE_DIR", released_root)
+        monkeypatch.setattr(jobs_module, "DEFAULT_CUSTOM_DATABASE_DIR", custom_root)
+        monkeypatch.setattr(jobs_module, "DEFAULT_RELEASED_DATABASE_DIR", released_root)
 
         jobs = discover_all_audit_jobs(tmp_path / "out")
         prompt_names = sorted(j.prompt_path.name for j in jobs)
@@ -1044,7 +1051,7 @@ class TestResolveAuditJobs:
     def _args(self, **over):
         ns = argparse.Namespace(
             prompt_files=None,
-            database_path=run_audit.DEFAULT_DATABASE_PATH,
+            database_path=jobs_module.DEFAULT_DATABASE_PATH,
             output_dir=Path("outputs/audit"),
         )
         for k, v in over.items():
@@ -1088,8 +1095,8 @@ class TestResolveAuditJobs:
         root.mkdir()
         released = tmp_path / "released_database"
         released.mkdir()
-        monkeypatch.setattr(run_audit, "DEFAULT_CUSTOM_DATABASE_DIR", root)
-        monkeypatch.setattr(run_audit, "DEFAULT_RELEASED_DATABASE_DIR", released)
+        monkeypatch.setattr(jobs_module, "DEFAULT_CUSTOM_DATABASE_DIR", root)
+        monkeypatch.setattr(jobs_module, "DEFAULT_RELEASED_DATABASE_DIR", released)
         args = self._args(output_dir=tmp_path / "out")
         assert resolve_audit_jobs(args) == []
 
@@ -1102,8 +1109,8 @@ class TestResolveAuditJobs:
         root.mkdir()
         released = tmp_path / "released_database"
         released.mkdir()
-        monkeypatch.setattr(run_audit, "DEFAULT_CUSTOM_DATABASE_DIR", root)
-        monkeypatch.setattr(run_audit, "DEFAULT_RELEASED_DATABASE_DIR", released)
+        monkeypatch.setattr(jobs_module, "DEFAULT_CUSTOM_DATABASE_DIR", root)
+        monkeypatch.setattr(jobs_module, "DEFAULT_RELEASED_DATABASE_DIR", released)
         args = self._args(database_path=db, output_dir=tmp_path / "out")
         assert resolve_audit_jobs(args) == []
 
@@ -1152,7 +1159,7 @@ class TestLogMetricsToWandb:
 
         wandb_module.init.assert_called_once()
         init_kwargs = wandb_module.init.call_args.kwargs
-        assert init_kwargs["project"] == run_audit.WANDB_PROJECT
+        assert init_kwargs["project"] == reporting.WANDB_PROJECT
         assert init_kwargs["name"].endswith("_FULL")
         assert init_kwargs["config"]["state"] == "FULL"
 

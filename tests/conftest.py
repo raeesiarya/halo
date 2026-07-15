@@ -7,7 +7,7 @@ import pytest
 
 matplotlib.use("Agg")
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/lmlm-audit"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 WANDB_TEST_PROJECT = "lmlm-audit-tests"
 
@@ -117,7 +117,7 @@ def fake_base_manager():
 
 @pytest.fixture
 def basic_target_fact():
-    from database_states import TargetFact
+    from lmlm_audit.rel_lmlm.database import TargetFact
 
     return TargetFact(
         fact_id=10,

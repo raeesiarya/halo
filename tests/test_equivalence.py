@@ -3,9 +3,9 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/lmlm-audit"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from equivalence import (
+from lmlm_audit.equivalence import (
     _flatten_alias_values,
     _unique_preserving_order,
     build_alias_set,

@@ -3,9 +3,9 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/lmlm-audit"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from metrics import (
+from lmlm_audit.metrics import (
     _average_metric,
     _eligible_state_groups,
     _group_results_by_fact,

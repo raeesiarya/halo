@@ -80,8 +80,8 @@ environment after downloading its model and index:
 ```bash
 cd /path/to/Co-LMLM
 
-PYTHONPATH=/path/to/HALOCoLMLM/src/lmlm-audit:src \
-uv run python /path/to/HALOCoLMLM/src/lmlm-audit/run_audit.py \
+PYTHONPATH=/path/to/HALOCoLMLM/src:src \
+uv run python -m lmlm_audit.run_audit \
   --backend colmlm \
   --colmlm-source-path . \
   --colmlm-model-path /path/to/CoLMLM-360M-FW \

@@ -1,9 +1,9 @@
 import re
 from dataclasses import dataclass
-from enum import Enum
 from typing import Any
 
-from equivalence import prompt_row_aliases, values_equivalent
+from lmlm_audit.equivalence import prompt_row_aliases, values_equivalent
+from lmlm_audit.states import DatabaseState
 
 
 LOOKUP_PATTERNS = [
@@ -11,12 +11,6 @@ LOOKUP_PATTERNS = [
     r"\[dblookup\('(.+?)',\s*'(.+?)'\)\s*->",
     r"<\|db_entity\|>(.+?)<\|db_relationship\|>(.+?)<\|db_return\|>",
 ]
-
-
-class DatabaseState(str, Enum):
-    FULL = "FULL"
-    DEL_ON = "DEL-ON"
-    DEL_OFF = "DEL-OFF"
 
 
 @dataclass(frozen=True)
@@ -28,10 +22,6 @@ class TargetFact:
     relation_aliases: tuple[str, ...]
     object: str
     object_aliases: tuple[str, ...]
-
-
-def retrieval_enabled(state: DatabaseState) -> bool:
-    return state is not DatabaseState.DEL_OFF
 
 
 def target_fact_from_prompt_row(prompt_row: dict[str, Any]) -> TargetFact:

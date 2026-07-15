@@ -3,17 +3,16 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/lmlm-audit"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from audit_backend import (
-    AuditExample,
+from lmlm_audit.backend import (
     AuditObservation,
-    DeletionManifest,
     audit_example,
     default_retrieval_trace,
     validate_intervention_results,
 )
-from database_states import DatabaseState
+from lmlm_audit.examples import AuditExample, DeletionManifest
+from lmlm_audit.states import DatabaseState
 
 
 class FakeBackend:
