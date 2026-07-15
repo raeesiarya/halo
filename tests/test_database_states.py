@@ -3,18 +3,17 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/lmlm-audit"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from database_states import (
+from lmlm_audit.rel_lmlm.database import (
     AuditDatabaseManager,
-    DatabaseState,
     TargetFact,
     candidate_supports_target_fact,
     extract_lookup_query,
     is_deleted_triplet,
-    retrieval_enabled,
     target_fact_from_prompt_row,
 )
+from lmlm_audit.core.states import DatabaseState, retrieval_enabled
 
 
 

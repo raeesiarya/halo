@@ -28,19 +28,13 @@ dependencies = [
 ]
 
 [project.scripts]
-lmlm-audit = "run_audit:main"
+lmlm-audit = "lmlm_audit.cli.run_audit:main"
 
 [tool.setuptools]
-package-dir = { "" = "src/lmlm-audit" }
-py-modules = [
-    "audit_backend",
-    "colmlm_backend",
-    "database_states",
-    "equivalence",
-    "metrics",
-    "model_loader",
-    "run_audit",
-]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.uv.sources]
 lmlm = { path = "../LMLM", editable = true }
