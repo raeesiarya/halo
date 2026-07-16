@@ -46,7 +46,10 @@ The repository currently supports:
 - entanglement sweeps (`--radius-grid 0.95:0.70:0.05`) that measure deletion
   efficacy against collateral damage on neighbor facts
   (`--neighbor-mode cosine|same-source`) and report per-fact operating
-  curves and the entanglement gap G(f).
+  curves and the entanglement gap G(f); and
+- a representational-leakage probe (`lmlm-audit-probe`) that fits a linear
+  readout on frozen query embeddings over a fact-disjoint split and reports
+  L_rep and Δ_rep against the behavioral DEL-OFF baseline.
 
 The Co-LMLM backend has unit-test coverage, but it still needs to be run against
 the full released checkpoint and index. The next research step is to move past
