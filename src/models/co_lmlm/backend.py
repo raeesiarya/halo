@@ -39,10 +39,7 @@ def _has_sqlite_mapping(index_path: Path) -> bool:
     return any((index_path / name).exists() for name in _SQLITE_MAPPING_NAMES)
 
 
-def extract_colmlm_answer(raw_text: str, prompt: str) -> str:
-    completion = str(raw_text)
-    if prompt and completion.startswith(prompt):
-        completion = completion[len(prompt) :]
+def _clean_completion(completion: str) -> str:
     completion = _FACT_BLOCK_PATTERN.sub(" ", completion)
     completion = _SPECIAL_TOKEN_PATTERN.sub(" ", completion)
     completion = re.sub(r"\s+", " ", completion).strip()
@@ -52,6 +49,22 @@ def extract_colmlm_answer(raw_text: str, prompt: str) -> str:
             break
     completion = re.split(r"(?<=[.!?])\s+", completion, maxsplit=1)[0]
     return completion.strip(" \t\n\r\"'`,;:.")
+
+
+def extract_colmlm_answer(raw_text: str, prompt: str) -> str:
+    completion = str(raw_text)
+    if prompt and completion.startswith(prompt):
+        completion = completion[len(prompt) :]
+    # The model freely decodes its in-text statement of the fact right after
+    # the closing </FACT>, so the tail of the last block is the answer span;
+    # anything before it is lead-in prose ("Billy Joel is an American ...").
+    # A dangling "<FACT" starts a truncated follow-up lookup, not prose.
+    if "</FACT>" in completion:
+        tail = completion.rsplit("</FACT>", 1)[1].split("<FACT", 1)[0]
+        tail = _clean_completion(tail)
+        if tail:
+            return tail
+    return _clean_completion(completion)
 
 
 @dataclass
