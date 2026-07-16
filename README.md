@@ -48,7 +48,14 @@ On top of the three-state comparison:
 
 ## Setup
 
-Python 3.12 and [uv](https://docs.astral.sh/uv/):
+The project requires Python 3.12 and [uv](https://docs.astral.sh/uv/) —
+install uv first if you don't have it:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Then set up the environment and run the tests:
 
 ```bash
 uv sync
