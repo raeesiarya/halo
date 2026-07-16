@@ -30,6 +30,12 @@ INDEX_DIR="${INDEX_DIR:-$REPO_ROOT/data/co-lmlm-wiki-index}"
 PROMPTS="${PROMPTS:-$REPO_ROOT/data/prompts.jsonl}"
 OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/outputs/popqa}"
 
+# The audit runs from inside the Co-LMLM checkout, so anchor relative
+# overrides to the invocation directory before we cd away.
+case "$INDEX_DIR" in /*) ;; *) INDEX_DIR="$PWD/$INDEX_DIR" ;; esac
+case "$PROMPTS" in /*) ;; *) PROMPTS="$PWD/$PROMPTS" ;; esac
+case "$OUTPUT_DIR" in /*) ;; *) OUTPUT_DIR="$PWD/$OUTPUT_DIR" ;; esac
+
 CLOSURE="${CLOSURE:-geometric,semantic}"
 RADIUS_GRID="${RADIUS_GRID:-0.95:0.70:0.05}"
 NEIGHBOR_MODE="${NEIGHBOR_MODE:-cosine}"
