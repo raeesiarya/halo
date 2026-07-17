@@ -404,3 +404,114 @@ def test_public_loader_arguments_map_to_release_factory() -> None:
     assert captured["device"] in ("cuda:0", "mps", "cpu")
     assert captured["torch_dtype"] in ("bfloat16", "float32")
     assert "attn_implementation" in captured
+
+
+# --- capability hooks (reuse fast paths) ------------------------------------
+
+
+from halo.core.examples import DeletionManifest  # noqa: E402
+from models.co_lmlm.backend import (  # noqa: E402
+    full_trace_unaffected,
+    manifest_reuse_fingerprint,
+)
+
+
+def _closure_manifest(entry_ids, source_ids=(), *, radius=0.9, target="Paris"):
+    return DeletionManifest(
+        entry_ids=tuple(entry_ids),
+        source_ids=tuple(source_ids),
+        strategy="closure",
+        metadata={
+            "predicates_active": ["geometric", "semantic", "provenance"],
+            "radius": radius,
+            "semantic_target": {"ground_truth": target, "object_aliases": []},
+        },
+    )
+
+
+def _full_row(candidates, *, state="FULL", complete=True, injected=0):
+    return {
+        "model_output": "Paris",
+        "retrieval_trace": {
+            "state": state,
+            "trace_available": True,
+            "trace_complete": complete,
+            "retrieval_events": [
+                {
+                    "all_candidates": list(candidates),
+                    "injected_candidates_count": injected,
+                }
+            ],
+        },
+    }
+
+
+def test_manifest_fingerprint_ignores_bookkeeping_metadata() -> None:
+    tight = _closure_manifest(("e1",), ("s1",), radius=0.9)
+    loose = _closure_manifest(("e1",), ("s1",), radius=0.7)
+    assert manifest_reuse_fingerprint(tight) == manifest_reuse_fingerprint(loose)
+    assert manifest_reuse_fingerprint(tight) != manifest_reuse_fingerprint(
+        _closure_manifest(("e1", "e2"), ("s1",))
+    )
+    assert manifest_reuse_fingerprint(tight) != manifest_reuse_fingerprint(
+        _closure_manifest(("e1",), ("s1",), target="Warsaw")
+    )
+
+
+def test_manifest_fingerprint_declines_without_semantic_target() -> None:
+    manifest = DeletionManifest(
+        entry_ids=("e1",),
+        strategy="closure",
+        metadata={"predicates_active": ["semantic"]},
+    )
+    assert manifest_reuse_fingerprint(manifest) is None
+
+
+def test_backend_hooks_make_no_claim_while_injections_are_active() -> None:
+    backend = CoLMLMAuditBackend(FakeGenerator(FakeIndex([])))
+    manifest = _closure_manifest(("e1",))
+    row = _full_row([{"entry_id": "other", "source_id": "s9", "value": "Rome"}])
+    assert backend.manifest_fingerprint(manifest) is not None
+    assert backend.full_row_unaffected(row, manifest) is True
+    backend.injections = (object(),)
+    assert backend.manifest_fingerprint(manifest) is None
+    assert backend.full_row_unaffected(row, manifest) is False
+
+
+def test_full_trace_unaffected_checks_all_three_filters() -> None:
+    manifest = _closure_manifest(("e1",), ("s1",), target="Paris")
+    clean = [{"entry_id": "e9", "source_id": "s9", "value": "Warsaw"}]
+    assert full_trace_unaffected(
+        _full_row(clean), manifest, default_support_judge
+    )
+    assert not full_trace_unaffected(
+        _full_row([{"entry_id": "e1", "source_id": "s9", "value": "Warsaw"}]),
+        manifest,
+        default_support_judge,
+    )
+    assert not full_trace_unaffected(
+        _full_row([{"entry_id": "e9", "source_id": "s1", "value": "Warsaw"}]),
+        manifest,
+        default_support_judge,
+    )
+    assert not full_trace_unaffected(
+        _full_row([{"entry_id": "e9", "source_id": "s9", "value": "Paris"}]),
+        manifest,
+        default_support_judge,
+    )
+
+
+def test_full_trace_unaffected_is_conservative_about_the_trace() -> None:
+    manifest = _closure_manifest(("e1",))
+    clean = [{"entry_id": "e9", "source_id": "s9", "value": "Warsaw"}]
+    assert full_trace_unaffected(_full_row([]), manifest, default_support_judge)
+    assert not full_trace_unaffected(
+        _full_row(clean, state="DEL-ON"), manifest, default_support_judge
+    )
+    assert not full_trace_unaffected(
+        _full_row(clean, complete=False), manifest, default_support_judge
+    )
+    assert not full_trace_unaffected(
+        _full_row(clean, injected=1), manifest, default_support_judge
+    )
+    assert not full_trace_unaffected(None, manifest, default_support_judge)

@@ -1,8 +1,8 @@
 import json
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Protocol, runtime_checkable
+from typing import Any, Hashable, Mapping, Protocol, runtime_checkable
 
-from halo.core.examples import AuditExample
+from halo.core.examples import AuditExample, DeletionManifest
 from halo.core.states import DatabaseState, retrieval_enabled
 
 
@@ -19,6 +19,30 @@ class AuditObservation:
 
 @runtime_checkable
 class AuditBackend(Protocol):
+    """A model under audit.
+
+    ``generate`` is the only required method. Backends may additionally
+    implement optional *capability hooks* — declarations of model-specific
+    guarantees that let the harness reuse generations it can prove
+    redundant. They are consulted via the ``backend_*`` helpers below, and
+    a backend that omits them gets the safe default (no claim, generate
+    everything):
+
+    ``manifest_fingerprint(manifest) -> Hashable | None``
+        "For a fixed prompt and state, my DEL-ON output depends on the
+        deletion manifest only through this value." Two sweep jobs for the
+        same subject whose manifests share a non-None fingerprint produce
+        identical rows, so the second reuses the first. Requires
+        deterministic decoding. Return None to make no claim.
+
+    ``full_row_unaffected(full_row, manifest) -> bool``
+        "Given this subject's FULL-pass result row, this manifest provably
+        cannot change the generation." When True, the DEL-ON row is copied
+        from the FULL row instead of generated. Only return True under a
+        soundness argument for this specific model; return False when in
+        doubt.
+    """
+
     def generate(
         self,
         example: AuditExample,
@@ -27,6 +51,32 @@ class AuditBackend(Protocol):
         max_new_tokens: int = 12,
     ) -> AuditObservation:
         ...
+
+
+def backend_manifest_fingerprint(
+    backend: AuditBackend, manifest: DeletionManifest
+) -> Hashable | None:
+    """The backend's manifest fingerprint, or None when it makes no claim."""
+    hook = getattr(backend, "manifest_fingerprint", None)
+    if hook is None:
+        return None
+    return hook(manifest)
+
+
+def backend_full_row_unaffected(
+    backend: AuditBackend,
+    full_row: Mapping[str, Any] | None,
+    manifest: DeletionManifest,
+) -> bool:
+    """Whether the backend certifies that ``manifest`` cannot change the
+    generation recorded in ``full_row``. False when the backend has no
+    ``full_row_unaffected`` hook or no FULL row is available."""
+    if full_row is None:
+        return False
+    hook = getattr(backend, "full_row_unaffected", None)
+    if hook is None:
+        return False
+    return bool(hook(full_row, manifest))
 
 
 def default_retrieval_trace(state: DatabaseState) -> dict[str, Any]:

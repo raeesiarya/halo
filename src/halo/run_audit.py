@@ -244,6 +244,7 @@ def main() -> None:
                         max_new_tokens=args.max_new_tokens,
                         limit=args.limit,
                         full_dir=shared_full_dir,
+                        reuse_canary_rate=args.reuse_canary_rate,
                     )
                     outputs = write_entanglement_outputs(
                         summary["entanglement"], sweep_dir
@@ -252,6 +253,10 @@ def main() -> None:
                         f"Sweep: {summary['swept_facts']}/{summary['facts']} "
                         f"facts over {len(summary['radii'])} radii "
                         f"({summary['executed_generations']} generations, "
+                        f"{summary['reused_generations']} reused "
+                        f"[{summary['reused_fingerprint']} fingerprint, "
+                        f"{summary['reused_full_pass']} full-pass, "
+                        f"{summary['canary_checks']} canary-verified], "
                         f"{summary['planned_generations']} planned)."
                     )
                     if summary["skipped_facts"]:
@@ -280,6 +285,8 @@ def main() -> None:
                                     "facts": len(gaps),
                                     "swept_facts": summary["swept_facts"],
                                     "executed_generations": summary["executed_generations"],
+                                    "reused_generations": summary["reused_generations"],
+                                    "canary_checks": summary["canary_checks"],
                                 },
                                 prefix=f"{stem}/entanglement/",
                             )

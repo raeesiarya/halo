@@ -6,13 +6,13 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Hashable, Mapping
 
 from halo.core.backend import AuditObservation
 from halo.interventions.judge import default_support_judge
 from halo.interventions.errors import AuditIntegrationError
 from halo.interventions.filtering import _FilteringSearchIndex
-from halo.core.examples import AuditExample
+from halo.core.examples import AuditExample, DeletionManifest
 from halo.core.states import DatabaseState
 
 _FACT_BLOCK_PATTERN = re.compile(r"<FACT>.*?</FACT>", re.DOTALL)
@@ -56,6 +56,95 @@ def extract_colmlm_answer(raw_text: str, prompt: str) -> str:
     if prompt and completion.startswith(prompt):
         completion = completion[len(prompt) :]
     return _clean_completion(completion)
+
+
+def _manifest_semantic_backstop(
+    manifest: DeletionManifest,
+) -> tuple[bool, AuditExample | None]:
+    """Whether the manifest activates the run-time semantic backstop, and the
+    example whose answer it judges against. The example is None when the
+    manifest carries no ``semantic_target`` (the filter would then fall back
+    to judging against whichever prompt is running)."""
+    metadata = manifest.metadata if isinstance(manifest.metadata, Mapping) else {}
+    predicates = metadata.get("predicates_active")
+    active = isinstance(predicates, (list, tuple)) and "semantic" in predicates
+    if not active:
+        return False, None
+    semantic_target = metadata.get("semantic_target")
+    if not isinstance(semantic_target, Mapping):
+        return True, None
+    return True, AuditExample(
+        prompt="",
+        ground_truth=str(semantic_target.get("ground_truth", "")),
+        object_aliases=tuple(
+            str(alias) for alias in (semantic_target.get("object_aliases") or ())
+        ),
+    )
+
+
+def manifest_reuse_fingerprint(manifest: DeletionManifest) -> Hashable | None:
+    """Everything a DEL-ON generation can observe of a deletion manifest.
+
+    Generation depends on the manifest only through the retrieval filters:
+    the excluded entry/source IDs and the semantic-backstop target. Radius,
+    entry counts, and the rest of the metadata are bookkeeping. Declines
+    (None) when the backstop is active without an explicit target, because
+    the filter would then depend implicitly on the running prompt.
+    """
+    backstop_active, backstop_example = _manifest_semantic_backstop(manifest)
+    if backstop_active and backstop_example is None:
+        return None
+    return (
+        frozenset(manifest.entry_ids),
+        frozenset(manifest.source_ids),
+        backstop_active,
+        (
+            (backstop_example.ground_truth, backstop_example.object_aliases)
+            if backstop_example is not None
+            else None
+        ),
+    )
+
+
+def full_trace_unaffected(
+    full_row: Mapping[str, Any],
+    manifest: DeletionManifest,
+    support_judge: Callable[[Any, AuditExample], Mapping[str, Any]],
+) -> bool:
+    """Whether ``manifest`` provably cannot change the generation recorded in
+    ``full_row``.
+
+    Co-LMLM decodes greedily and its deletion filter only *removes*
+    candidates, so retrieval results — and therefore the whole generation —
+    are unchanged whenever every candidate the FULL pass actually saw
+    survives the manifest's three filters (entry ID, source ID, semantic
+    backstop). The check walks the FULL trace's retrieval events; events
+    that returned nothing stay empty under any deletion.
+    """
+    trace = (full_row or {}).get("retrieval_trace") or {}
+    if trace.get("state") != DatabaseState.FULL.value:
+        return False
+    if not trace.get("trace_available") or not trace.get("trace_complete"):
+        return False
+    backstop_active, backstop_example = _manifest_semantic_backstop(manifest)
+    if backstop_active and backstop_example is None:
+        return False
+    excluded_entry_ids = set(manifest.entry_ids)
+    excluded_source_ids = set(manifest.source_ids)
+    for event in trace.get("retrieval_events") or []:
+        if event.get("injected_candidates_count"):
+            return False
+        for candidate in event.get("all_candidates") or []:
+            if str(candidate.get("entry_id")) in excluded_entry_ids:
+                return False
+            source_id = candidate.get("source_id")
+            if source_id is not None and str(source_id) in excluded_source_ids:
+                return False
+            if backstop_active and dict(
+                support_judge(candidate, backstop_example)
+            ).get("supports_target"):
+                return False
+    return True
 
 
 @dataclass
@@ -155,6 +244,25 @@ class CoLMLMAuditBackend:
             release_source=release_source,
         )
 
+    def manifest_fingerprint(self, manifest: DeletionManifest) -> Hashable | None:
+        """Capability hook: DEL-ON output depends on the manifest only through
+        its retrieval filters (decoding is greedy). No claim while adversarial
+        injections are active — they change retrieval independently of the
+        manifest."""
+        if self.injections:
+            return None
+        return manifest_reuse_fingerprint(manifest)
+
+    def full_row_unaffected(
+        self, full_row: Mapping[str, Any], manifest: DeletionManifest
+    ) -> bool:
+        """Capability hook: with greedy decoding and removal-only filtering,
+        a manifest that catches nothing the FULL pass retrieved cannot change
+        the generation."""
+        if self.injections:
+            return False
+        return full_trace_unaffected(full_row, manifest, self.support_judge)
+
     def generate(
         self,
         example: AuditExample,
@@ -189,29 +297,15 @@ class CoLMLMAuditBackend:
                     raise AuditIntegrationError(
                         "The Co-LMLM generator does not expose its search index."
                     )
-                manifest_metadata = (
-                    manifest.metadata if isinstance(manifest.metadata, Mapping) else {}
+                backstop_active, backstop_target = _manifest_semantic_backstop(
+                    manifest
                 )
-                manifest_predicates = manifest_metadata.get("predicates_active")
                 semantic_backstop = (
-                    state is DatabaseState.DEL_ON
-                    and isinstance(manifest_predicates, (list, tuple))
-                    and "semantic" in manifest_predicates
+                    state is DatabaseState.DEL_ON and backstop_active
                 )
-                semantic_target = manifest_metadata.get("semantic_target")
-                backstop_example = None
-                if semantic_backstop and isinstance(semantic_target, Mapping):
-                    # Judge against the deleted fact's answer, which is not
-                    # necessarily this prompt's answer (neighbor prompts in a
-                    # sweep run under the target fact's manifest).
-                    backstop_example = AuditExample(
-                        prompt="",
-                        ground_truth=str(semantic_target.get("ground_truth", "")),
-                        object_aliases=tuple(
-                            str(alias)
-                            for alias in (semantic_target.get("object_aliases") or ())
-                        ),
-                    )
+                backstop_example = (
+                    backstop_target if semantic_backstop else None
+                )
                 filtered_index = _FilteringSearchIndex(
                     base_index=original_index,
                     example=example,

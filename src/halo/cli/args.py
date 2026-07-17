@@ -142,6 +142,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Maximum neighbors per fact in the entanglement sweep.",
     )
     closure.add_argument(
+        "--reuse-canary-rate",
+        type=float,
+        default=0.01,
+        help=(
+            "Fraction of sweep generations eligible for backend reuse fast "
+            "paths to re-execute anyway and assert equal to the reused row "
+            "(a soundness check on the backend's capability hooks). "
+            "0 disables the canary."
+        ),
+    )
+    closure.add_argument(
         "--adversarial",
         action="store_true",
         help=(

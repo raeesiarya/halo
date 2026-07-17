@@ -13,6 +13,14 @@
 # partway, re-running it skips everything already on disk. All phases log to
 # W&B as separate runs named <output-dir>__<mode>.
 #
+# Wall-clock tip: phase 2 shards cleanly by radius. Run one single-radius
+# sweep first (e.g. RADIUS_GRID=0.95:0.95:0.05) so the shared FULL pass is
+# materialized, then launch the remaining radii as parallel processes (one
+# GPU each, same OUTPUT_DIR — each writes its own sweep_rho_*.jsonl), and
+# finally re-run the full grid: it resumes every per-radius file and only
+# computes the analysis. Do NOT shard by prompt file subsets — neighbor
+# sets N(f) are defined within a prompt file.
+#
 # Optional:  CO_LMLM_DIR (defaults to ../Co-LMLM next to this repo; cloned
 #            from GitHub if absent), INDEX_DIR, PROMPTS, OUTPUT_DIR,
 #            CLOSURE, RADIUS_GRID, NEIGHBOR_MODE

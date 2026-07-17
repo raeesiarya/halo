@@ -322,7 +322,10 @@ def test_entanglement_sweep_end_to_end(tmp_path) -> None:
     assert summary["skipped_facts"] == []
     # 2 facts x 2 radii x (1 target + 1 neighbor)
     assert summary["planned_generations"] == 8
-    assert summary["executed_generations"] == 8
+    assert summary["executed_generations"] == 6
+    assert summary["reused_full_pass"] == 2
+    assert summary["reused_fingerprint"] == 0
+    assert summary["reused_generations"] == 2
 
     for fact in ("pA", "pB"):
         curve = summary["entanglement"][fact]["curve"]
@@ -396,13 +399,124 @@ def test_entanglement_sweep_reuses_shared_full_pass(tmp_path) -> None:
     calls_after_first = generator.generate_calls
 
     # A fresh sweep directory resumes the shared FULL pass: only the sweep
-    # generations run again (2 facts x 2 radii x 2 prompts), no FULL pass.
+    # generations run again, no FULL pass.
     second = run_entanglement_sweep(
         prompt_path, backend, output_dir=tmp_path / "sweep2", **kwargs
     )
-    assert second["executed_generations"] == 8
-    assert generator.generate_calls == calls_after_first + 8
+    assert second["executed_generations"] == 6
+    assert generator.generate_calls == calls_after_first + 6
     assert second["entanglement"] == first["entanglement"]
+
+
+# --- reuse fast paths ------------------------------------------------------
+
+
+def test_sweep_dedupes_identical_manifests_across_radii(tmp_path) -> None:
+    index, generator, backend = _sweep_setup()
+    prompt_path = _write_sweep_prompts(tmp_path)
+
+    summary = run_entanglement_sweep(
+        prompt_path,
+        backend,
+        index=index,
+        radii=(0.9, 0.8),
+        closure_config=ClosureConfig(),
+        neighbor_config=NeighborConfig(mode="cosine", ball=0.5, cap=20),
+        output_dir=tmp_path / "sweep",
+    )
+
+    assert summary["planned_generations"] == 8
+    assert summary["executed_generations"] == 2
+    assert summary["reused_full_pass"] == 2
+    assert summary["reused_fingerprint"] == 4
+    for rho_name, reused_expected in (("0.9000", 2), ("0.8000", 4)):
+        rows = [
+            json.loads(line)
+            for line in (tmp_path / "sweep" / f"sweep_rho_{rho_name}.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        reused = [row for row in rows if row["sweep"].get("reused")]
+        assert len(rows) == 4
+        assert len(reused) == reused_expected
+        for row in rows:
+            assert row["state"] == "DEL-ON"
+            assert (
+                row["retrieval_trace"]["deletion_manifest_id"]
+                == row["deletion_manifest"]["manifest_id"]
+            )
+    for fact in ("pA", "pB"):
+        curve = summary["entanglement"][fact]["curve"]
+        assert [point["efficacy"] for point in curve] == [1.0, 1.0]
+        assert [point["collateral"] for point in curve] == [0.0, 0.0]
+
+
+def test_sweep_canary_regenerates_and_verifies(tmp_path) -> None:
+    index, generator, backend = _sweep_setup()
+    prompt_path = _write_sweep_prompts(tmp_path)
+
+    summary = run_entanglement_sweep(
+        prompt_path,
+        backend,
+        index=index,
+        radii=(0.9, 0.8),
+        closure_config=ClosureConfig(),
+        neighbor_config=NeighborConfig(mode="cosine", ball=0.5, cap=20),
+        output_dir=tmp_path / "sweep",
+        reuse_canary_rate=1.0,
+    )
+
+    assert summary["executed_generations"] == 8
+    assert summary["reused_generations"] == 0
+    assert summary["canary_checks"] == 6
+
+
+def test_sweep_canary_catches_unsound_hook(tmp_path) -> None:
+    from halo.interventions.errors import AuditIntegrationError
+
+    index, generator, backend = _sweep_setup()
+    prompt_path = _write_sweep_prompts(tmp_path)
+    backend.full_row_unaffected = lambda full_row, manifest: True
+
+    with pytest.raises(AuditIntegrationError, match="canary failed"):
+        run_entanglement_sweep(
+            prompt_path,
+            backend,
+            index=index,
+            radii=(0.5,),
+            closure_config=ClosureConfig(),
+            neighbor_config=NeighborConfig(mode="cosine", ball=0.5, cap=20),
+            output_dir=tmp_path / "sweep",
+            reuse_canary_rate=1.0,
+        )
+
+
+class HookLessBackend:
+    """A backend exposing only the required protocol surface."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+
+    def generate(self, example, state, *, max_new_tokens=12):
+        return self._inner.generate(example, state, max_new_tokens=max_new_tokens)
+
+
+def test_sweep_without_hooks_generates_everything(tmp_path) -> None:
+    index, generator, backend = _sweep_setup()
+    prompt_path = _write_sweep_prompts(tmp_path)
+
+    summary = run_entanglement_sweep(
+        prompt_path,
+        HookLessBackend(backend),
+        index=index,
+        radii=(0.9, 0.8),
+        closure_config=ClosureConfig(),
+        neighbor_config=NeighborConfig(mode="cosine", ball=0.5, cap=20),
+        output_dir=tmp_path / "sweep",
+    )
+
+    assert summary["executed_generations"] == 8
+    assert summary["reused_generations"] == 0
 
 
 # --- CLI grid parsing ------------------------------------------------------

@@ -11,8 +11,11 @@ from tqdm import tqdm
 from halo.core.backend import (
     AuditBackend,
     audit_example,
+    backend_full_row_unaffected,
+    backend_manifest_fingerprint,
     validate_intervention_results,
 )
+from halo.interventions.errors import AuditIntegrationError
 from halo.core.embeddings import QueryEmbeddingSink, result_example_key
 from halo.core.entanglement import compute_entanglement, fact_key
 from halo.core.examples import AuditExample, DeletionManifest
@@ -242,6 +245,51 @@ def _full_pass(
     return full_rows, vectors
 
 
+def _canary_selected(
+    target_key: str, role: str, subject_key: str, rho: float, rate: float
+) -> bool:
+    """Deterministic per-job canary draw, stable across resumes."""
+    if rate <= 0.0:
+        return False
+    if rate >= 1.0:
+        return True
+    token = f"{target_key}|{role}|{subject_key}|{rho:.6f}".encode("utf-8")
+    return (zlib.crc32(token) % 10_000) < int(rate * 10_000)
+
+
+def _reused_sweep_row(
+    source_row: dict[str, Any],
+    *,
+    manifest: DeletionManifest,
+    rho: float,
+    target_key: str,
+    role: str,
+    reused_from: str,
+) -> dict[str, Any]:
+    """A DEL-ON sweep row copied from an equivalent prior generation.
+
+    Only the manifest bookkeeping and the sweep tag are rewritten; the trace
+    keeps the source run's candidate lists (thinner than a live DEL-ON run
+    would record), which is why the row is marked ``reused``.
+    """
+    row = json.loads(json.dumps(source_row, ensure_ascii=False))
+    row.pop("_query_embeddings", None)
+    row["state"] = DatabaseState.DEL_ON.value
+    row["deletion_manifest"] = manifest.as_dict()
+    trace = row.get("retrieval_trace")
+    if isinstance(trace, dict):
+        trace["state"] = DatabaseState.DEL_ON.value
+        trace["retrieval_enabled"] = True
+        trace["deletion_manifest_id"] = manifest.manifest_id
+    row["sweep"] = {
+        "target_key": target_key,
+        "rho": rho,
+        "role": role,
+        "reused": reused_from,
+    }
+    return row
+
+
 def run_entanglement_sweep(
     prompt_path: Path,
     backend: AuditBackend,
@@ -254,6 +302,7 @@ def run_entanglement_sweep(
     max_new_tokens: int = 12,
     limit: int | None = None,
     full_dir: Path | None = None,
+    reuse_canary_rate: float = 0.0,
 ) -> dict[str, Any]:
     """Radius sweep for the entanglement analysis (E, X, G).
 
@@ -264,6 +313,14 @@ def run_entanglement_sweep(
     (target, role, subject) triples already on disk are skipped. `full_dir`
     holds the FULL-pass artifacts (defaults to `output_dir`); point the sweep
     and the adversarial evaluation at the same directory to share one pass.
+
+    Backends can cut the generation count via two capability hooks (see
+    ``halo.core.backend``): identical manifest fingerprints share one
+    generation per subject, and manifests a backend certifies as unable to
+    affect a subject reuse that subject's FULL row. Reused rows carry
+    ``sweep.reused``. ``reuse_canary_rate`` re-executes that fraction of
+    reusable jobs anyway and raises if the generated output disagrees with
+    the reused row — a continuous soundness check on the hooks.
     """
     from halo.interventions.closure import (
         build_closure_family,
@@ -320,54 +377,139 @@ def run_entanglement_sweep(
     write_neighbors_file(raw_neighbors, neighbor_config, output_dir / "neighbors.json")
     neighbors = neighbor_keys(raw_neighbors)
 
+    if not 0.0 <= reuse_canary_rate <= 1.0:
+        raise ValueError("reuse_canary_rate must be in [0, 1].")
+
     planned = sum(len(radii) * (1 + len(neighbors.get(key, []))) for key in families)
     executed = 0
+    reused_fingerprint = 0
+    reused_full_pass = 0
+    canary_checks = 0
     sweep_rows: list[dict[str, Any]] = []
-    progress = tqdm(
-        total=planned, desc=f"Sweeping {prompt_path.stem}", unit="generation"
-    )
+    done: dict[float, set[tuple[str, str, str]]] = {}
+    rows_on_disk: dict[float, dict[tuple[str, str, str], dict[str, Any]]] = {}
     for rho in radii:
         rho_path = output_dir / f"sweep_rho_{rho:.4f}.jsonl"
-        done: set[tuple[str, str, str]] = set()
+        done[rho] = set()
+        rows_on_disk[rho] = {}
         if rho_path.exists():
             for row in load_prompts(rho_path):
                 tag = row.get("sweep") or {}
-                done.add(
-                    (str(tag.get("target_key")), str(tag.get("role")), fact_key(row))
+                triple = (
+                    str(tag.get("target_key")),
+                    str(tag.get("role")),
+                    fact_key(row),
                 )
+                done[rho].add(triple)
+                rows_on_disk[rho][triple] = row
                 sweep_rows.append(row)
-        with rho_path.open("a", encoding="utf-8") as handle:
-            for key, family in families.items():
-                manifest = family[rho].to_manifest()
-                jobs = [("target", key)] + [
-                    ("neighbor", neighbor_key)
-                    for neighbor_key in neighbors.get(key, [])
-                    if neighbor_key in examples
-                ]
-                for role, subject_key in jobs:
-                    if (key, role, subject_key) in done:
+
+    generation_cache: dict[tuple[str, Any], dict[str, Any]] = {}
+    handles = {
+        rho: (output_dir / f"sweep_rho_{rho:.4f}.jsonl").open("a", encoding="utf-8")
+        for rho in radii
+    }
+    progress = tqdm(
+        total=planned, desc=f"Sweeping {prompt_path.stem}", unit="generation"
+    )
+    try:
+        for key, family in families.items():
+            manifests = {rho: family[rho].to_manifest() for rho in radii}
+            fingerprints = {
+                rho: backend_manifest_fingerprint(backend, manifests[rho])
+                for rho in radii
+            }
+            jobs = [("target", key)] + [
+                ("neighbor", neighbor_key)
+                for neighbor_key in neighbors.get(key, [])
+                if neighbor_key in examples
+            ]
+            for role, subject_key in jobs:
+                for rho in radii:
+                    triple = (key, role, subject_key)
+                    fingerprint = fingerprints[rho]
+                    cache_key = (
+                        (subject_key, fingerprint)
+                        if fingerprint is not None
+                        else None
+                    )
+                    if triple in done[rho]:
+                        if cache_key is not None:
+                            generation_cache.setdefault(
+                                cache_key, rows_on_disk[rho][triple]
+                            )
                         progress.update(1)
                         continue
-                    subject = dataclasses.replace(
-                        examples[subject_key], deletion_manifest=manifest
+                    manifest = manifests[rho]
+                    reused_from: str | None = None
+                    source_row: dict[str, Any] | None = None
+                    if cache_key is not None and cache_key in generation_cache:
+                        reused_from = "fingerprint"
+                        source_row = generation_cache[cache_key]
+                    elif backend_full_row_unaffected(
+                        backend, full_rows.get(subject_key), manifest
+                    ):
+                        reused_from = "full-pass"
+                        source_row = full_rows[subject_key]
+                    canary = reused_from is not None and _canary_selected(
+                        key, role, subject_key, rho, reuse_canary_rate
                     )
-                    row = audit_example(
-                        backend,
-                        subject,
-                        DatabaseState.DEL_ON,
-                        max_new_tokens=max_new_tokens,
-                    )
-                    row.pop("_query_embeddings", None)
-                    row["sweep"] = {
-                        "target_key": key,
-                        "rho": rho,
-                        "role": role,
-                    }
-                    handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+                    if reused_from is not None and not canary:
+                        row = _reused_sweep_row(
+                            source_row,
+                            manifest=manifest,
+                            rho=rho,
+                            target_key=key,
+                            role=role,
+                            reused_from=reused_from,
+                        )
+                        if reused_from == "fingerprint":
+                            reused_fingerprint += 1
+                        else:
+                            reused_full_pass += 1
+                    else:
+                        subject = dataclasses.replace(
+                            examples[subject_key], deletion_manifest=manifest
+                        )
+                        row = audit_example(
+                            backend,
+                            subject,
+                            DatabaseState.DEL_ON,
+                            max_new_tokens=max_new_tokens,
+                        )
+                        row.pop("_query_embeddings", None)
+                        row["sweep"] = {
+                            "target_key": key,
+                            "rho": rho,
+                            "role": role,
+                        }
+                        executed += 1
+                        if reused_from is not None:
+                            canary_checks += 1
+                            row["sweep"]["canary_verified"] = reused_from
+                            if row["model_output"] != source_row["model_output"]:
+                                raise AuditIntegrationError(
+                                    f"Reuse canary failed for target {key!r} "
+                                    f"({role} {subject_key!r}, rho={rho}): the "
+                                    f"{reused_from!r} fast path predicted "
+                                    f"{source_row['model_output']!r} but the "
+                                    "backend generated "
+                                    f"{row['model_output']!r}."
+                                )
+                    if cache_key is not None:
+                        generation_cache.setdefault(cache_key, row)
+                    handles[rho].write(json.dumps(row, ensure_ascii=False) + "\n")
                     sweep_rows.append(row)
-                    executed += 1
                     progress.update(1)
-    progress.close()
+                    progress.set_postfix(
+                        executed=executed,
+                        reused=reused_fingerprint + reused_full_pass,
+                        refresh=False,
+                    )
+    finally:
+        progress.close()
+        for handle in handles.values():
+            handle.close()
 
     entanglement = compute_entanglement(sweep_rows, list(full_rows.values()), neighbors)
     return {
@@ -378,6 +520,10 @@ def run_entanglement_sweep(
         "radii": list(radii),
         "planned_generations": planned,
         "executed_generations": executed,
+        "reused_generations": reused_fingerprint + reused_full_pass,
+        "reused_fingerprint": reused_fingerprint,
+        "reused_full_pass": reused_full_pass,
+        "canary_checks": canary_checks,
         "entanglement": entanglement,
         "output_dir": str(output_dir),
     }
