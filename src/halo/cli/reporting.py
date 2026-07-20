@@ -54,6 +54,7 @@ def write_entanglement_outputs(
             "target_key": target_key,
             "gap": summary["gap"],
             "gap_rho": summary["gap_rho"],
+            "gap_eligible": summary.get("gap_eligible", summary["gap"] is not None),
         }
         for target_key, summary in sorted(entanglement.items())
     ]
@@ -84,8 +85,15 @@ def write_entanglement_outputs(
     if len(entanglement) <= 10:
         curve_axis.legend(fontsize="small")
 
-    gaps = [summary["gap"] for summary in entanglement.values()]
-    gap_axis.hist(gaps, bins=min(20, max(5, len(gaps))), edgecolor="black")
+    gaps = [
+        summary["gap"]
+        for summary in entanglement.values()
+        if summary.get("gap") is not None
+    ]
+    if gaps:
+        gap_axis.hist(gaps, bins=min(20, max(5, len(gaps))), edgecolor="black")
+    else:
+        gap_axis.text(0.5, 0.5, "No eligible neighbor sets", ha="center")
     gap_axis.set_xlabel("Entanglement gap G(f)")
     gap_axis.set_ylabel("Facts")
     gap_axis.set_title("G(f) distribution")

@@ -9,7 +9,7 @@
 # Optional:  CO_LMLM_DIR (defaults to ../Co-LMLM next to this repo; cloned
 #            from GitHub if absent), INDEX_DIR, PROMPTS, OUTPUT_DIR
 # Extra flags (e.g. --closure, --radius-grid, --adversarial) are passed through:
-#   ./scripts/run_audit_co_lmlm.sh --closure geometric,semantic --radius-grid 0.95:0.70:0.05
+#   ./scripts/run_audit_co_lmlm.sh --closure geometric --radius-grid 0.95:0.70:0.05
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

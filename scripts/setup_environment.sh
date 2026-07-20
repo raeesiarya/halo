@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# One-time environment setup for HALO: installs uv (per the README) and the
-# system libraries the Python dependencies need (OpenBLAS for faiss).
-# Run this once on a fresh machine before scripts/run_audit*_co_lmlm.sh.
+# HALO environment setup: uv and the OpenBLAS dependency for FAISS.
 set -euo pipefail
 
 if ! command -v uv >/dev/null; then

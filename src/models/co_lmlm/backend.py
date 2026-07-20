@@ -58,26 +58,29 @@ def extract_colmlm_answer(raw_text: str, prompt: str) -> str:
     return _clean_completion(completion)
 
 
-def _manifest_semantic_backstop(
+def _manifest_value_backstop(
     manifest: DeletionManifest,
 ) -> tuple[bool, AuditExample | None]:
-    """Whether the manifest activates the run-time semantic backstop, and the
+    """Whether the manifest activates the run-time value backstop, and the
     example whose answer it judges against. The example is None when the
-    manifest carries no ``semantic_target`` (the filter would then fall back
+    manifest carries no explicit target (the filter would then fall back
     to judging against whichever prompt is running)."""
     metadata = manifest.metadata if isinstance(manifest.metadata, Mapping) else {}
     predicates = metadata.get("predicates_active")
-    active = isinstance(predicates, (list, tuple)) and "semantic" in predicates
+    # Compatibility with manifests written before the value rename.
+    active = isinstance(predicates, (list, tuple)) and bool(
+        {"value", "semantic"}.intersection(predicates)
+    )
     if not active:
         return False, None
-    semantic_target = metadata.get("semantic_target")
-    if not isinstance(semantic_target, Mapping):
+    value_target = metadata.get("value_target", metadata.get("semantic_target"))
+    if not isinstance(value_target, Mapping):
         return True, None
     return True, AuditExample(
         prompt="",
-        ground_truth=str(semantic_target.get("ground_truth", "")),
+        ground_truth=str(value_target.get("ground_truth", "")),
         object_aliases=tuple(
-            str(alias) for alias in (semantic_target.get("object_aliases") or ())
+            str(alias) for alias in (value_target.get("object_aliases") or ())
         ),
     )
 
@@ -86,12 +89,12 @@ def manifest_reuse_fingerprint(manifest: DeletionManifest) -> Hashable | None:
     """Everything a DEL-ON generation can observe of a deletion manifest.
 
     Generation depends on the manifest only through the retrieval filters:
-    the excluded entry/source IDs and the semantic-backstop target. Radius,
+    the excluded entry/source IDs and the value-backstop target. Radius,
     entry counts, and the rest of the metadata are bookkeeping. Declines
     (None) when the backstop is active without an explicit target, because
     the filter would then depend implicitly on the running prompt.
     """
-    backstop_active, backstop_example = _manifest_semantic_backstop(manifest)
+    backstop_active, backstop_example = _manifest_value_backstop(manifest)
     if backstop_active and backstop_example is None:
         return None
     return (
@@ -117,7 +120,7 @@ def full_trace_unaffected(
     Co-LMLM decodes greedily and its deletion filter only *removes*
     candidates, so retrieval results — and therefore the whole generation —
     are unchanged whenever every candidate the FULL pass actually saw
-    survives the manifest's three filters (entry ID, source ID, semantic
+    survives the manifest's three filters (entry ID, source ID, value
     backstop). The check walks the FULL trace's retrieval events; events
     that returned nothing stay empty under any deletion.
     """
@@ -126,7 +129,7 @@ def full_trace_unaffected(
         return False
     if not trace.get("trace_available") or not trace.get("trace_complete"):
         return False
-    backstop_active, backstop_example = _manifest_semantic_backstop(manifest)
+    backstop_active, backstop_example = _manifest_value_backstop(manifest)
     if backstop_active and backstop_example is None:
         return False
     excluded_entry_ids = set(manifest.entry_ids)
@@ -158,6 +161,8 @@ class CoLMLMAuditBackend:
     max_filter_search_k: int = 131072
     del_off_mode: str = "null-retrieval"
     release_source: str | None = None
+    model_path: str | None = None
+    index_path: str | None = None
     # Synthetic index entries (adversarial survivors) active for subsequent
     # generate() calls; set/cleared by the adversarial runner.
     injections: tuple[Any, ...] = ()
@@ -247,6 +252,8 @@ class CoLMLMAuditBackend:
             generator=generator,
             del_off_mode=del_off_mode,
             release_source=release_source,
+            model_path=str(model_path),
+            index_path=str(Path(index_path).expanduser().resolve()),
         )
 
     def manifest_fingerprint(self, manifest: DeletionManifest) -> Hashable | None:
@@ -302,14 +309,14 @@ class CoLMLMAuditBackend:
                     raise AuditIntegrationError(
                         "The Co-LMLM generator does not expose its search index."
                     )
-                backstop_active, backstop_target = _manifest_semantic_backstop(
+                backstop_active, backstop_target = _manifest_value_backstop(
                     manifest
                 )
-                semantic_backstop = (
+                value_backstop = (
                     state is DatabaseState.DEL_ON and backstop_active
                 )
                 backstop_example = (
-                    backstop_target if semantic_backstop else None
+                    backstop_target if value_backstop else None
                 )
                 filtered_index = _FilteringSearchIndex(
                     base_index=original_index,
@@ -321,7 +328,7 @@ class CoLMLMAuditBackend:
                         manifest.source_ids if state is DatabaseState.DEL_ON else ()
                     ),
                     exclude_all=state is DatabaseState.DEL_OFF,
-                    exclude_supporting=semantic_backstop,
+                    exclude_supporting=value_backstop,
                     backstop_example=backstop_example,
                     injections=tuple(self.injections),
                     support_judge=self.support_judge,

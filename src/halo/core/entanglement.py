@@ -68,6 +68,9 @@ def compute_entanglement(
 
     entanglement: dict[str, dict[str, Any]] = {}
     for target_key, rows_by_rho in targets.items():
+        # Exclude targets that were incorrect under FULL.
+        if target_key not in correct_under_full:
+            continue
         neighbor_keys = list(neighbors.get(target_key, []))
         curve: list[dict[str, Any]] = []
         for rho in sorted(rows_by_rho, reverse=True):
@@ -93,10 +96,16 @@ def compute_entanglement(
                     "gap_term": (1.0 - efficacy) + collateral,
                 }
             )
-        gap_point = min(curve, key=lambda point: point["gap_term"])
+        # G(f) is undefined for an empty neighbor set.
+        gap_point = (
+            min(curve, key=lambda point: point["gap_term"])
+            if neighbor_keys
+            else None
+        )
         entanglement[target_key] = {
             "curve": curve,
-            "gap": gap_point["gap_term"],
-            "gap_rho": gap_point["rho"],
+            "gap": gap_point["gap_term"] if gap_point is not None else None,
+            "gap_rho": gap_point["rho"] if gap_point is not None else None,
+            "gap_eligible": gap_point is not None,
         }
     return entanglement

@@ -20,7 +20,7 @@ from halo.core.neighbors import (
     compute_same_source_neighbors,
 )
 from halo.cli.reporting import write_entanglement_outputs
-from halo.cli.args import parse_radius_grid
+from halo.cli.args import parse_args, parse_radius_grid
 from halo.cli.runner import run_entanglement_sweep
 
 
@@ -73,13 +73,24 @@ def test_collateral_ignores_neighbors_wrong_under_full() -> None:
     assert entanglement["t"]["gap_rho"] == 0.8
 
 
-def test_fact_with_no_neighbors_has_zero_collateral() -> None:
+def test_fact_with_no_neighbors_has_no_entanglement_gap() -> None:
     full_rows = [_row("t", "Paris", "Paris")]
     sweep_rows = [
         _row("t", "unknown", "Paris", target="t", rho=0.8, role="target"),
     ]
     entanglement = compute_entanglement(sweep_rows, full_rows, {"t": []})
-    assert entanglement["t"]["gap"] == 0.0
+    assert entanglement["t"]["gap"] is None
+    assert entanglement["t"]["gap_rho"] is None
+    assert entanglement["t"]["gap_eligible"] is False
+
+
+def test_target_wrong_under_full_is_not_credited_with_forgetting() -> None:
+    full_rows = [_row("t", "Lyon", "Paris"), _row("n1", "Warsaw", "Warsaw")]
+    sweep_rows = [
+        _row("t", "unknown", "Paris", target="t", rho=0.8, role="target"),
+        _row("n1", "Warsaw", "Warsaw", target="t", rho=0.8, role="neighbor"),
+    ]
+    assert compute_entanglement(sweep_rows, full_rows, {"t": ["n1"]}) == {}
 
 
 # --- neighbors -------------------------------------------------------------
@@ -110,6 +121,13 @@ def test_cosine_neighbors_respect_ball_and_cap() -> None:
     )
     assert [item["neighbor"] for item in capped["a"]] == ["b"]
 
+    filled = compute_cosine_neighbors(
+        embeddings,
+        NeighborConfig(mode="cosine", ball=0.95, cap=2, min_count=1),
+    )
+    assert [item["neighbor"] for item in filled["a"]] == ["b"]
+    assert filled["a"][0]["within_ball"] is False
+
 
 def test_same_source_neighbors() -> None:
     neighbors = compute_same_source_neighbors(
@@ -126,6 +144,10 @@ def test_neighbor_config_validation() -> None:
         NeighborConfig(mode="psychic")
     with pytest.raises(ValueError, match="cap"):
         NeighborConfig(cap=0)
+    with pytest.raises(ValueError, match="negative"):
+        NeighborConfig(min_count=-1)
+    with pytest.raises(ValueError, match="exceed"):
+        NeighborConfig(cap=2, min_count=3)
 
 
 # --- closure family --------------------------------------------------------
@@ -377,6 +399,27 @@ def test_entanglement_sweep_resumes_without_regenerating(tmp_path) -> None:
     assert second["entanglement"] == first["entanglement"]
 
 
+def test_entanglement_sweep_rejects_mismatched_resume_config(tmp_path) -> None:
+    from halo.interventions.errors import AuditIntegrationError
+
+    index, _, backend = _sweep_setup()
+    prompt_path = _write_sweep_prompts(tmp_path)
+    output_dir = tmp_path / "sweep"
+    common = dict(
+        index=index,
+        closure_config=ClosureConfig(predicates=("geometric",)),
+        neighbor_config=NeighborConfig(mode="cosine", ball=0.5, cap=20),
+        output_dir=output_dir,
+    )
+    run_entanglement_sweep(
+        prompt_path, backend, radii=(0.9, 0.5), **common
+    )
+    with pytest.raises(AuditIntegrationError, match="configuration mismatch"):
+        run_entanglement_sweep(
+            prompt_path, backend, radii=(0.9,), **common
+        )
+
+
 def test_entanglement_sweep_reuses_shared_full_pass(tmp_path) -> None:
     index, generator, backend = _sweep_setup()
     prompt_path = _write_sweep_prompts(tmp_path)
@@ -537,3 +580,18 @@ def test_parse_radius_grid() -> None:
         parse_radius_grid("0.5:0.9:0.1")
     with pytest.raises(ValueError, match="positive"):
         parse_radius_grid("0.9:0.5:0")
+
+
+def test_colmlm_control_and_neighbor_floor_parse_from_cli() -> None:
+    args = parse_args(
+        [
+            "--backend",
+            "co-lmlm",
+            "--co-lmlm-del-off-mode",
+            "forbid-token",
+            "--neighbor-min-count",
+            "7",
+        ]
+    )
+    assert args.co_lmlm_del_off_mode == "forbid-token"
+    assert args.neighbor_min_count == 7

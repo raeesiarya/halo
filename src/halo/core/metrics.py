@@ -291,6 +291,29 @@ def retrieval_mediated_correctness_given_full(
     ) / len(eligible_groups)
 
 
+def retrieval_interference(results: list[dict[str, Any]]) -> float:
+    """Rate where post-deletion retrieval turns a correct control answer wrong."""
+    eligible_groups = _eligible_state_groups(results)
+    if not eligible_groups:
+        return 0.0
+    return sum(
+        not _result_is_correct(state_results["DEL-ON"])
+        and _result_is_correct(state_results["DEL-OFF"])
+        for state_results in eligible_groups
+    ) / len(eligible_groups)
+
+
+def retrieval_interference_given_full(results: list[dict[str, Any]]) -> float:
+    eligible_groups = _full_correct_state_groups(results)
+    if not eligible_groups:
+        return 0.0
+    return sum(
+        not _result_is_correct(state_results["DEL-ON"])
+        and _result_is_correct(state_results["DEL-OFF"])
+        for state_results in eligible_groups
+    ) / len(eligible_groups)
+
+
 def post_deletion_survival_given_full(results: list[dict[str, Any]]) -> float:
     eligible_groups = _full_correct_state_groups(results)
     if not eligible_groups:
@@ -421,6 +444,10 @@ def metrics_total(results: list[dict[str, Any]]) -> dict[str, float | int]:
         "retrieval_mediated_correctness": retrieval_mediated_correctness(results),
         "retrieval_mediated_correctness_given_full": (
             retrieval_mediated_correctness_given_full(results)
+        ),
+        "retrieval_interference": retrieval_interference(results),
+        "retrieval_interference_given_full": retrieval_interference_given_full(
+            results
         ),
         "retrieval_artifact_rate": retrieval_artifact_rate(results),
         "retrieval_artifact_eligible_count": retrieval_artifact_eligible_count(

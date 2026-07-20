@@ -22,6 +22,20 @@ SIMILARITY_THRESHOLD: float | None = None  # match the released eval config
 NPROBE: int | None = None  # use the index's own nprobe
 
 
+def _add_arguments(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_argument_group("Co-LMLM controls")
+    group.add_argument(
+        "--co-lmlm-del-off-mode",
+        choices=("null-retrieval", "forbid-token"),
+        default="null-retrieval",
+        help=(
+            "DEL-OFF control: let <FACT> lookups return no candidate and then "
+            "fall back to decoding, or forbid retrieval tokens entirely. "
+            "Report both modes before interpreting parametric leakage."
+        ),
+    )
+
+
 def _build_backend(args: argparse.Namespace, _group_key: Any) -> AuditBackend:
     from models.co_lmlm.backend import CoLMLMAuditBackend
 
@@ -34,6 +48,7 @@ def _build_backend(args: argparse.Namespace, _group_key: Any) -> AuditBackend:
         similarity_threshold=SIMILARITY_THRESHOLD,
         nprobe=NPROBE,
         max_new_tokens=args.max_new_tokens,
+        del_off_mode=args.co_lmlm_del_off_mode,
     )
 
 
@@ -59,6 +74,7 @@ register_backend(
         build_backend=_build_backend,
         build_search_index=_search_index,
         group_key=_group_key,
+        add_arguments=_add_arguments,
         validate=_validate,
     )
 )

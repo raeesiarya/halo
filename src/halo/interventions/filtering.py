@@ -84,14 +84,14 @@ class _FilteringSearchIndex:
     support_judge: Callable[[Any, AuditExample], Mapping[str, Any]]
     exclude_all: bool = False
     exclude_supporting: bool = False
-    # The example whose answer the semantic backstop judges against. Under a
+    # The example whose answer the value backstop judges against. Under a
     # sweep, neighbor prompts run with the *target* fact's manifest, so this
     # differs from `example` (which drives trace serialization).
     backstop_example: AuditExample | None = None
     # Synthetic entries (interventions.adversary.InjectedEntry) spliced into the
     # candidate list by live cosine against the query. They bypass ID/source
     # exclusion (fresh ids, no source) but face the threshold, exclude_all,
-    # and the semantic backstop like any real candidate.
+    # and the value backstop like any real candidate.
     injections: tuple[Any, ...] = ()
     max_filter_overfetch: int = 4096
     # Hard ceiling on the over-retrieval budget after progressive widening.

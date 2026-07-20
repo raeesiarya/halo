@@ -503,9 +503,9 @@ def _closure_manifest(entry_ids, source_ids=(), *, radius=0.9, target="Paris"):
         source_ids=tuple(source_ids),
         strategy="closure",
         metadata={
-            "predicates_active": ["geometric", "semantic", "provenance"],
+            "predicates_active": ["geometric", "value", "provenance"],
             "radius": radius,
-            "semantic_target": {"ground_truth": target, "object_aliases": []},
+            "value_target": {"ground_truth": target, "object_aliases": []},
         },
     )
 
@@ -539,11 +539,11 @@ def test_manifest_fingerprint_ignores_bookkeeping_metadata() -> None:
     )
 
 
-def test_manifest_fingerprint_declines_without_semantic_target() -> None:
+def test_manifest_fingerprint_declines_without_value_target() -> None:
     manifest = DeletionManifest(
         entry_ids=("e1",),
         strategy="closure",
-        metadata={"predicates_active": ["semantic"]},
+        metadata={"predicates_active": ["value"]},
     )
     assert manifest_reuse_fingerprint(manifest) is None
 

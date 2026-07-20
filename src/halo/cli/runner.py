@@ -1,4 +1,5 @@
 import dataclasses
+import hashlib
 import json
 import zlib
 from collections import Counter
@@ -19,6 +20,7 @@ from halo.interventions.errors import AuditIntegrationError
 from halo.core.embeddings import QueryEmbeddingSink, result_example_key
 from halo.core.entanglement import compute_entanglement, fact_key
 from halo.core.examples import AuditExample, DeletionManifest
+from halo.core.metrics import _result_is_correct
 from halo.core.neighbors import (
     NeighborConfig,
     compute_cosine_neighbors,
@@ -60,6 +62,7 @@ def run_backend_audit(
         Callable[[AuditExample, dict[str, Any]], DeletionManifest] | None
     ) = None,
     skip_log_path: Path | None = None,
+    coverage_summary: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     if not states:
         raise ValueError("At least one audit state is required.")
@@ -169,6 +172,15 @@ def run_backend_audit(
     if bootstrap_oracle_from_full:
         audited = len(prompts) - len(skipped)
         by_reason = Counter(item["reason"] for item in skipped)
+        if coverage_summary is not None:
+            coverage_summary.update(
+                {
+                    "facts": len(prompts),
+                    "audited_facts": audited,
+                    "skipped_facts": len(skipped),
+                    "skipped_by_reason": dict(by_reason),
+                }
+            )
         breakdown = "".join(
             f"\n  {count}x {reason}" for reason, count in by_reason.most_common()
         )
@@ -182,6 +194,15 @@ def run_backend_audit(
                 for item in skipped:
                     handle.write(json.dumps(item, ensure_ascii=False) + "\n")
             tqdm.write(f"Wrote per-fact skip details to {skip_log_path}")
+    elif coverage_summary is not None:
+        coverage_summary.update(
+            {
+                "facts": len(prompts),
+                "audited_facts": len(prompts),
+                "skipped_facts": 0,
+                "skipped_by_reason": {},
+            }
+        )
 
     return results
 
@@ -203,9 +224,59 @@ def _load_examples(prompt_path: Path, limit: int | None) -> dict[str, AuditExamp
     return examples
 
 
+def _prompt_digest(prompt_path: Path) -> str:
+    digest = hashlib.sha256()
+    with prompt_path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _backend_resume_identity(backend: AuditBackend) -> dict[str, str]:
+    """Stable backend fields that can change generated or retrieved outputs."""
+    identity = {
+        "class": f"{type(backend).__module__}.{type(backend).__qualname__}"
+    }
+    for field in ("model_path", "index_path", "release_source"):
+        value = getattr(backend, field, None)
+        if value is not None:
+            identity[field] = str(value)
+    return identity
+
+
+def _ensure_resume_config(
+    path: Path,
+    payload: dict[str, Any],
+    *,
+    legacy_artifacts: tuple[Path, ...] = (),
+) -> None:
+    """Prevent resumable artifacts from crossing experiment definitions."""
+    normalized = json.loads(json.dumps(payload, sort_keys=True, default=str))
+    if path.exists():
+        stored = json.loads(path.read_text(encoding="utf-8"))
+        if stored != normalized:
+            raise AuditIntegrationError(
+                f"Resume configuration mismatch in {path}. Use a fresh output "
+                "directory rather than mixing experiment definitions."
+            )
+        return
+    existing = [artifact for artifact in legacy_artifacts if artifact.exists()]
+    if existing:
+        raise AuditIntegrationError(
+            f"Found resumable artifacts without {path.name}: {existing[0]}. "
+            "They predate configuration guards; use a fresh output directory."
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(normalized, indent=2, sort_keys=True), encoding="utf-8"
+    )
+
+
 def _full_pass(
     backend: AuditBackend,
     examples: dict[str, AuditExample],
+    prompt_path: Path,
+    limit: int | None,
     output_dir: Path,
     max_new_tokens: int,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, np.ndarray]]:
@@ -216,6 +287,17 @@ def _full_pass(
     output_dir.mkdir(parents=True, exist_ok=True)
     full_rows_path = output_dir / "full_results.jsonl"
     embeddings_path = output_dir / "full_query_embeddings.npz"
+    _ensure_resume_config(
+        output_dir / "full_config.json",
+        {
+            "mode": "full-pass",
+            "backend": _backend_resume_identity(backend),
+            "prompt_sha256": _prompt_digest(prompt_path),
+            "limit": limit,
+            "max_new_tokens": max_new_tokens,
+        },
+        legacy_artifacts=(full_rows_path, embeddings_path),
+    )
     full_rows: dict[str, dict[str, Any]] = {}
     vectors: dict[str, np.ndarray] = {}
     if full_rows_path.exists() and embeddings_path.exists():
@@ -243,6 +325,25 @@ def _full_pass(
     if vectors:
         np.savez_compressed(embeddings_path, **vectors)
     return full_rows, vectors
+
+
+def _primary_target_skip_reason(
+    full_row: dict[str, Any] | None,
+    query_vector: np.ndarray | None,
+) -> str | None:
+    """Return the primary-cohort exclusion reason, if any."""
+    if not full_row:
+        return "missing FULL result"
+    selected = (full_row.get("retrieval_trace") or {}).get("selected_candidate") or {}
+    if not selected.get("entry_id"):
+        return "FULL produced no selected entry ID"
+    if selected.get("supports_target") is not True:
+        return "FULL selected entry did not pass the target-support judge"
+    if not _result_is_correct(full_row):
+        return "FULL answer was incorrect"
+    if query_vector is None:
+        return "FULL produced no query embedding"
+    return None
 
 
 def _canary_selected(
@@ -334,18 +435,47 @@ def run_entanglement_sweep(
 
     examples = _load_examples(prompt_path, limit)
     full_rows, vectors = _full_pass(
-        backend, examples, full_dir or output_dir, max_new_tokens
+        backend,
+        examples,
+        prompt_path,
+        limit,
+        full_dir or output_dir,
+        max_new_tokens,
+    )
+
+    _ensure_resume_config(
+        output_dir / "evaluation_config.json",
+        {
+            "mode": "entanglement-sweep",
+            "backend": _backend_resume_identity(backend),
+            "prompt_sha256": _prompt_digest(prompt_path),
+            "limit": limit,
+            "max_new_tokens": max_new_tokens,
+            "radii": list(radii),
+            "closure": {
+                "predicates": list(closure_config.predicates),
+                "radius": closure_config.radius,
+                "envelope_top_k": closure_config.envelope_top_k,
+                "max_closure_size": closure_config.max_closure_size,
+            },
+            "neighbors": dataclasses.asdict(neighbor_config),
+        },
+        legacy_artifacts=tuple(output_dir.glob("sweep_rho_*.jsonl"))
+        + (output_dir / "neighbors.json",),
     )
 
     # Closure families: one geometric search per fact covers every radius.
     families: dict[str, dict[float, Any]] = {}
     skipped: list[str] = []
+    skipped_by_reason: Counter[str] = Counter()
     judge = getattr(backend, "support_judge", None)
     for key, example in examples.items():
         selected = full_selected_candidate(full_rows.get(key, {}))
         vector = vectors.get(key)
-        if not selected or not selected.get("entry_id") or vector is None:
+        skip_reason = _primary_target_skip_reason(full_rows.get(key), vector)
+        if skip_reason is not None:
             skipped.append(key)
+            skipped_by_reason[skip_reason] += 1
             continue
         seed_source = selected.get("source_id")
         family_kwargs: dict[str, Any] = {}
@@ -517,6 +647,7 @@ def run_entanglement_sweep(
         "facts": len(examples),
         "swept_facts": len(families),
         "skipped_facts": skipped,
+        "skipped_by_reason": dict(skipped_by_reason),
         "radii": list(radii),
         "planned_generations": planned,
         "executed_generations": executed,
@@ -556,23 +687,51 @@ def run_adversarial_eval(
         full_selected_candidate,
         write_closure_artifact,
     )
-    from halo.core.metrics import _result_is_correct, auroc
+    from halo.core.metrics import auroc
 
     config = adversarial_config
     output_dir.mkdir(parents=True, exist_ok=True)
     examples = _load_examples(prompt_path, limit)
     full_rows, vectors = _full_pass(
-        backend, examples, full_dir or output_dir, max_new_tokens
+        backend,
+        examples,
+        prompt_path,
+        limit,
+        full_dir or output_dir,
+        max_new_tokens,
+    )
+
+    _ensure_resume_config(
+        output_dir / "evaluation_config.json",
+        {
+            "mode": "adversarial",
+            "backend": _backend_resume_identity(backend),
+            "del_off_mode": getattr(backend, "del_off_mode", None),
+            "prompt_sha256": _prompt_digest(prompt_path),
+            "limit": limit,
+            "max_new_tokens": max_new_tokens,
+            "closure": {
+                "predicates": list(closure_config.predicates),
+                "radius": closure_config.radius,
+                "envelope_top_k": closure_config.envelope_top_k,
+                "max_closure_size": closure_config.max_closure_size,
+            },
+            "adversarial": dataclasses.asdict(config),
+        },
+        legacy_artifacts=(output_dir / "adversarial_results.jsonl",),
     )
 
     closures: dict[str, Any] = {}
     skipped: list[str] = []
+    skipped_by_reason: Counter[str] = Counter()
     judge = getattr(backend, "support_judge", None)
     for key, example in examples.items():
         selected = full_selected_candidate(full_rows.get(key, {}))
         vector = vectors.get(key)
-        if not selected or not selected.get("entry_id") or vector is None:
+        skip_reason = _primary_target_skip_reason(full_rows.get(key), vector)
+        if skip_reason is not None:
             skipped.append(key)
+            skipped_by_reason[skip_reason] += 1
             continue
         seed_source = selected.get("source_id")
         family_kwargs: dict[str, Any] = {}
@@ -660,18 +819,19 @@ def run_adversarial_eval(
             rows.append(row)
             executed += 1
 
-    # Aggregate: R(f), Ev(rho, epsilon, template), margin AUROC.
+    # Aggregate R(f), attack attribution, and margin AUROC.
+    result_rows: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     correctness: dict[tuple[str, str, str, str], bool] = {}
     for row in rows:
         tag = row.get("adversarial") or {}
-        correctness[
-            (
-                str(tag.get("target_key")),
-                str(tag.get("role")),
-                str(tag.get("epsilon")),
-                str(tag.get("template")),
-            )
-        ] = _result_is_correct(row)
+        result_key = (
+            str(tag.get("target_key")),
+            str(tag.get("role")),
+            str(tag.get("epsilon")),
+            str(tag.get("template")),
+        )
+        result_rows[result_key] = row
+        correctness[result_key] = _result_is_correct(row)
 
     r_of: dict[str, bool] = {}
     for key in closures:
@@ -684,11 +844,56 @@ def run_adversarial_eval(
     evasion_rows: list[dict[str, Any]] = []
     for epsilon in config.epsilons:
         for template in config.templates:
-            outcomes = [
-                correctness[(key, "attack", str(epsilon), str(template))]
+            attack_keys = [
+                key
                 for key in closures
                 if (key, "attack", str(epsilon), str(template)) in correctness
             ]
+            outcomes = [
+                correctness[(key, "attack", str(epsilon), str(template))]
+                for key in attack_keys
+            ]
+            baseline_outcomes = [
+                correctness.get((key, "baseline", "None", "None"), False)
+                for key in attack_keys
+            ]
+            target_selected: list[bool] = []
+            for key in attack_keys:
+                attack_row = result_rows[
+                    (key, "attack", str(epsilon), str(template))
+                ]
+                selected = (
+                    (attack_row.get("retrieval_trace") or {}).get(
+                        "selected_candidate"
+                    )
+                    or {}
+                )
+                metadata = selected.get("metadata") or {}
+                entry_id = str(selected.get("entry_id") or "")
+                target_selected.append(
+                    metadata.get("synthetic") is True
+                    and entry_id.startswith(f"adv-{template}-")
+                )
+            selected_count = sum(target_selected)
+            gains = [
+                attack_correct and not baseline_correct
+                for attack_correct, baseline_correct in zip(
+                    outcomes, baseline_outcomes
+                )
+            ]
+            regressions = [
+                baseline_correct and not attack_correct
+                for attack_correct, baseline_correct in zip(
+                    outcomes, baseline_outcomes
+                )
+            ]
+            selected_correct = sum(
+                attack_correct and selected
+                for attack_correct, selected in zip(outcomes, target_selected)
+            )
+            selected_gains = sum(
+                gain and selected for gain, selected in zip(gains, target_selected)
+            )
             evasion_rows.append(
                 {
                     "rho": config.rho,
@@ -696,8 +901,30 @@ def run_adversarial_eval(
                     "template": template,
                     "topology": config.topology,
                     "facts": len(outcomes),
+                    "selected_facts": selected_count,
+                    "target_selected_rate": (
+                        selected_count / len(outcomes) if outcomes else None
+                    ),
+                    "baseline_correct_rate": (
+                        sum(baseline_outcomes) / len(outcomes) if outcomes else None
+                    ),
                     "evasion_rate": (
                         sum(outcomes) / len(outcomes) if outcomes else None
+                    ),
+                    "post_attack_correct_rate": (
+                        sum(outcomes) / len(outcomes) if outcomes else None
+                    ),
+                    "attack_gain_rate": (
+                        sum(gains) / len(outcomes) if outcomes else None
+                    ),
+                    "attack_regression_rate": (
+                        sum(regressions) / len(outcomes) if outcomes else None
+                    ),
+                    "correct_given_target_selected": (
+                        selected_correct / selected_count if selected_count else None
+                    ),
+                    "gain_given_target_selected": (
+                        selected_gains / selected_count if selected_count else None
                     ),
                 }
             )
@@ -735,10 +962,13 @@ def run_adversarial_eval(
         "facts": len(examples),
         "attacked_facts": len(closures),
         "skipped_facts": skipped,
+        "skipped_by_reason": dict(skipped_by_reason),
         "rho": config.rho,
         "epsilons": list(config.epsilons),
         "templates": list(config.templates),
         "topology": config.topology,
+        "closure_predicates": list(closure_config.predicates),
+        "del_off_mode": getattr(backend, "del_off_mode", None),
         "executed_generations": executed,
         "evasion": evasion_rows,
         "margins": margin_rows,

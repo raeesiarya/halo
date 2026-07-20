@@ -239,7 +239,7 @@ def test_injected_survivor_is_retrieved_after_deletion() -> None:
     assert trace["retrieval_events"][0]["injected_candidates_count"] == 1
 
 
-def test_semantic_backstop_catches_verbatim_but_not_evading_survivor() -> None:
+def test_value_backstop_catches_verbatim_but_not_evading_survivor() -> None:
     index = FakeVectorIndex(
         [FakeVectorEntry("entry-a", QUERY.copy(), "Paris", "wiki:France")]
     )
@@ -252,8 +252,8 @@ def test_semantic_backstop_catches_verbatim_but_not_evading_survivor() -> None:
             "entry_ids": ["entry-a"],
             "strategy": "closure",
             "metadata": {
-                "predicates_active": ["semantic"],
-                "semantic_target": {
+                "predicates_active": ["value"],
+                "value_target": {
                     "ground_truth": "Paris",
                     "object_aliases": [],
                 },
@@ -346,6 +346,12 @@ def test_adversarial_eval_end_to_end(tmp_path) -> None:
     # the fact; the fake model cannot decode the hyphenated paraphrase.
     assert evasion["verbatim"] == 1.0
     assert evasion["hyphenated"] == 0.0
+    attributed = {row["template"]: row for row in summary["evasion"]}
+    assert attributed["verbatim"]["target_selected_rate"] == 1.0
+    assert attributed["verbatim"]["attack_gain_rate"] == 1.0
+    assert attributed["verbatim"]["gain_given_target_selected"] == 1.0
+    assert attributed["hyphenated"]["target_selected_rate"] == 1.0
+    assert attributed["hyphenated"]["attack_gain_rate"] == 0.0
     assert summary["margins"][0]["s_del"] == pytest.approx(1.0)
     # Injections stay out of the backend between calls.
     assert backend.injections == ()

@@ -125,9 +125,9 @@ def test_full_closure_attributes_each_predicate() -> None:
 
     caught = {entry.entry_id: entry.caught_by for entry in closure.entries}
     assert caught == {
-        "target-entry": ("geometric", "oracle", "provenance", "semantic"),
+        "target-entry": ("geometric", "oracle", "provenance", "value"),
         "near-neighbor": ("geometric",),
-        "alias-entry": ("semantic",),
+        "alias-entry": ("value",),
         "far-entry": ("provenance",),
     }
     assert closure.source_ids == ("wiki:France",)
@@ -144,7 +144,7 @@ def test_full_closure_attributes_each_predicate() -> None:
     assert manifest.source_ids == ("wiki:France",)
     assert manifest.metadata["entry_counts"] == {
         "geometric": 2,
-        "semantic": 2,
+        "value": 2,
         "provenance": 2,
         "oracle": 1,
     }
@@ -162,6 +162,11 @@ def test_geometric_truncation_is_flagged() -> None:
     assert closure.truncated is True
     assert [entry.entry_id for entry in closure.entries] == ["target-entry"]
     assert closure.to_manifest().metadata["truncated"] is True
+
+
+def test_legacy_semantic_predicate_is_canonicalized_to_value() -> None:
+    config = ClosureConfig(predicates=("semantic", "value"))
+    assert config.predicates == ("value",)
 
 
 def test_provenance_only_closure_never_searches() -> None:
@@ -266,7 +271,7 @@ class FakeGenerator:
         )
 
 
-def test_semantic_backstop_nulls_supporting_candidates_missed_by_closure() -> None:
+def test_value_backstop_nulls_supporting_candidates_missed_by_closure() -> None:
     # alias-entry sits above the generation threshold so it would be
     # retrieved once target-entry is deleted — unless the backstop fires.
     index = FakeVectorIndex(
@@ -289,10 +294,10 @@ def test_semantic_backstop_nulls_supporting_candidates_missed_by_closure() -> No
             "gold_object": "Paris",
             "deletion_manifest": {
                 # Closure deliberately misses alias-entry; the backstop must
-                # catch it because the semantic predicate is active.
+                # catch it because the value predicate is active.
                 "entry_ids": ["target-entry"],
                 "strategy": "closure",
-                "metadata": {"predicates_active": ["semantic"]},
+                "metadata": {"predicates_active": ["value"]},
             },
         }
     )

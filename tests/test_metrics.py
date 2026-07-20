@@ -30,6 +30,8 @@ from halo.core.metrics import (
     retrieval_artifact_eligible_count,
     retrieval_artifact_full_eligible_count,
     retrieval_artifact_rate_given_full,
+    retrieval_interference,
+    retrieval_interference_given_full,
     retrieval_mediated_correctness,
     retrieval_mediated_correctness_given_full,
     score_prediction,
@@ -508,6 +510,7 @@ class TestMetricsTotal:
             "count", "exact_match", "contains_match", "unknown_rate",
             "precision", "recall", "f1", "paired_count",
             "parametric_leakage", "retrieval_mediated_correctness",
+            "retrieval_interference",
             "retrieval_artifact_rate",
         }
         assert expected_keys <= set(summary.keys())
@@ -797,6 +800,39 @@ class TestRetrievalMediatedCorrectness:
         assert retrieval_mediated_correctness(results) == 0.0
 
 
+class TestRetrievalInterference:
+    def test_del_on_wrong_del_off_correct(self):
+        results = _del_on_off_pair(
+            del_on_output="WRONG", del_off_output="GT", ground_truth="GT"
+        )
+        assert retrieval_interference(results) == 1.0
+
+    def test_retrieval_rescue_is_not_interference(self):
+        results = _del_on_off_pair(
+            del_on_output="GT", del_off_output="WRONG", ground_truth="GT"
+        )
+        assert retrieval_interference(results) == 0.0
+
+    def test_given_full_excludes_full_incorrect_groups(self):
+        full_wrong = _del_on_off_pair(
+            fact_id=1,
+            prompt="Q1?",
+            del_on_output="WRONG",
+            del_off_output="GT",
+            ground_truth="GT",
+        )
+        full_wrong.insert(
+            0,
+            _result(
+                fact_id=1,
+                prompt="Q1?",
+                state="FULL",
+                model_output="WRONG",
+                ground_truth="GT",
+            ),
+        )
+        assert retrieval_interference(full_wrong) == 1.0
+        assert retrieval_interference_given_full(full_wrong) == 0.0
 
 def test_retrieval_artifact_rate() -> None:
     results = [

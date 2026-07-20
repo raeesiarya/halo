@@ -15,6 +15,7 @@ class NeighborConfig:
     mode: str = "cosine"
     ball: float = 0.5
     cap: int = 20
+    min_count: int = 0
 
     def __post_init__(self) -> None:
         if self.mode not in VALID_NEIGHBOR_MODES:
@@ -26,6 +27,10 @@ class NeighborConfig:
             raise ValueError("ball must be a cosine similarity in [-1, 1].")
         if self.cap < 1:
             raise ValueError("cap must be at least 1.")
+        if self.min_count < 0:
+            raise ValueError("min_count cannot be negative.")
+        if self.min_count > self.cap:
+            raise ValueError("min_count cannot exceed cap.")
 
 
 def compute_cosine_neighbors(
@@ -43,18 +48,32 @@ def compute_cosine_neighbors(
     neighbors: dict[str, list[dict[str, Any]]] = {key: [] for key in keys}
     for key in keys:
         if key not in vectors:
-            # No usable embedding: an explicit empty neighbor set, never a
-            # silent skip.
             continue
         scored = []
         for other in keys:
             if other == key or other not in vectors:
                 continue
             cosine = float(np.dot(vectors[key], vectors[other]))
-            if cosine >= config.ball:
-                scored.append({"neighbor": other, "cosine": cosine})
+            scored.append(
+                {
+                    "neighbor": other,
+                    "cosine": cosine,
+                    "within_ball": cosine >= config.ball,
+                }
+            )
         scored.sort(key=lambda item: (-item["cosine"], item["neighbor"]))
-        neighbors[key] = scored[: config.cap]
+        within_ball = [item for item in scored if item["within_ball"]]
+        selected = within_ball[: config.cap]
+        if len(selected) < config.min_count:
+            selected_ids = {item["neighbor"] for item in selected}
+            selected.extend(
+                item
+                for item in scored
+                if item["neighbor"] not in selected_ids
+            )
+            selected = selected[: max(config.min_count, len(within_ball))]
+            selected = selected[: config.cap]
+        neighbors[key] = selected
     return neighbors
 
 
@@ -97,6 +116,7 @@ def write_neighbors_file(
             "mode": config.mode,
             "ball": config.ball,
             "cap": config.cap,
+            "min_count": config.min_count,
         },
         "neighbors": {key: list(items) for key, items in neighbors.items()},
     }

@@ -69,6 +69,13 @@ def main() -> None:
                     "--radius-grid sweeps the closure radius and requires --closure."
                 )
             parse_radius_grid(args.radius_grid)
+            predicates = closure_config_from_args(args).predicates
+            if predicates != ("geometric",):
+                raise ValueError(
+                    "--radius-grid must isolate the geometric predicate; "
+                    "value/provenance members are radius-independent and "
+                    "flatten the operating curve. Pass --closure geometric."
+                )
 
         if args.adversarial:
             if args.closure is None:
@@ -79,6 +86,11 @@ def main() -> None:
                 raise ValueError(
                     "--adversarial and --radius-grid are separate evaluation "
                     "modes; run them individually."
+                )
+            if "geometric" not in closure_config_from_args(args).predicates:
+                raise ValueError(
+                    "--adversarial places survivors relative to a geometric "
+                    "radius and therefore requires geometric in --closure."
                 )
 
         jobs = resolve_audit_jobs(args)
@@ -113,8 +125,10 @@ def main() -> None:
                     "closure_radius": args.closure_radius,
                     "radius_grid": args.radius_grid,
                     "neighbor_mode": args.neighbor_mode,
+                    "neighbor_min_count": args.neighbor_min_count,
                     "adversarial_topology": args.adversarial_topology,
                     "bootstrap_oracle_from_full": args.bootstrap_oracle_from_full,
+                    "del_off_mode": getattr(args, "co_lmlm_del_off_mode", None),
                 },
             )
 
@@ -179,15 +193,32 @@ def main() -> None:
                     )
                     if summary["skipped_facts"]:
                         logger.print(
-                            "Skipped facts (no FULL selection/embedding): "
+                            "Skipped facts outside the strict primary cohort: "
                             + ", ".join(summary["skipped_facts"])
                         )
+                        for reason, count in summary.get(
+                            "skipped_by_reason", {}
+                        ).items():
+                            logger.print(f"  {count}x {reason}")
                     for row in summary["evasion"]:
                         rate = row["evasion_rate"]
+                        gain = row["attack_gain_rate"]
+                        selected = row["target_selected_rate"]
                         logger.print(
-                            f"  Ev(rho={row['rho']}, eps={row['epsilon']}, "
+                            f"  Attack(rho={row['rho']}, eps={row['epsilon']}, "
                             f"{row['template']}): "
-                            + (f"{rate:.3f}" if rate is not None else "n/a")
+                            + (f"post-correct={rate:.3f}" if rate is not None else "n/a")
+                            + (f", gain={gain:.3f}" if gain is not None else ", gain=n/a")
+                            + (
+                                f", selected={selected:.3f}"
+                                if selected is not None
+                                else ", selected=n/a"
+                            )
+                            + (
+                                f", gain|selected={row['gain_given_target_selected']:.3f}"
+                                if row["gain_given_target_selected"] is not None
+                                else ", gain|selected=n/a"
+                            )
                             + f" over {row['facts']} facts"
                         )
                     if summary["margin_auroc"] is not None:
@@ -210,7 +241,11 @@ def main() -> None:
                                 run.log(
                                     {
                                         f"{stem}/evasion/eps{row['epsilon']}"
-                                        f"_{row['template']}": row["evasion_rate"]
+                                        f"_{row['template']}/post_correct": row["evasion_rate"],
+                                        f"{stem}/evasion/eps{row['epsilon']}"
+                                        f"_{row['template']}/gain": row["attack_gain_rate"],
+                                        f"{stem}/evasion/eps{row['epsilon']}"
+                                        f"_{row['template']}/selected": row["target_selected_rate"],
                                     }
                                 )
                         wandb_log_metrics(
@@ -239,6 +274,7 @@ def main() -> None:
                             mode=args.neighbor_mode,
                             ball=args.neighbor_ball,
                             cap=args.neighbor_cap,
+                            min_count=args.neighbor_min_count,
                         ),
                         output_dir=sweep_dir,
                         max_new_tokens=args.max_new_tokens,
@@ -261,10 +297,18 @@ def main() -> None:
                     )
                     if summary["skipped_facts"]:
                         logger.print(
-                            "Skipped facts (no FULL selection/embedding): "
+                            "Skipped facts outside the strict primary cohort: "
                             + ", ".join(summary["skipped_facts"])
                         )
-                    gaps = [item["gap"] for item in summary["entanglement"].values()]
+                        for reason, count in summary.get(
+                            "skipped_by_reason", {}
+                        ).items():
+                            logger.print(f"  {count}x {reason}")
+                    gaps = [
+                        item["gap"]
+                        for item in summary["entanglement"].values()
+                        if item.get("gap") is not None
+                    ]
                     if gaps:
                         logger.print(
                             f"G(f): mean {sum(gaps) / len(gaps):.3f}, "
@@ -310,6 +354,7 @@ def main() -> None:
                     if args.backend == "co-lmlm" and args.closure is not None
                     else None
                 )
+                coverage_summary: dict[str, Any] = {}
                 results = run_backend_audit(
                     prompt_path=job.prompt_path,
                     backend=backend,
@@ -324,6 +369,7 @@ def main() -> None:
                     skip_log_path=job.output_path.with_name(
                         f"{job.prompt_path.stem}_skipped_facts.jsonl"
                     ),
+                    coverage_summary=coverage_summary,
                 )
 
                 save_results(results, job.output_path)
@@ -367,6 +413,12 @@ def main() -> None:
                             )
                         )
                 total_metrics = metrics_total(results)
+                del_off_mode = getattr(backend, "del_off_mode", None)
+                closure_policy = (
+                    ",".join(closure_config_from_args(args).predicates)
+                    if args.closure is not None
+                    else "oracle"
+                )
                 metrics_by_state = {
                     state.value: metrics_total(
                         [result for result in results if result["state"] == state.value]
@@ -378,6 +430,19 @@ def main() -> None:
                     {
                         "prompt_file": str(job.prompt_path),
                         "database_path": str(database_path),
+                        "backend": args.backend,
+                        "closure_policy": closure_policy,
+                        "closure_radius": (
+                            args.closure_radius if args.closure is not None else None
+                        ),
+                        "del_off_mode": del_off_mode,
+                        "source_facts": coverage_summary.get("facts"),
+                        "verified_support_facts": coverage_summary.get(
+                            "audited_facts"
+                        ),
+                        "coverage_skipped_facts": coverage_summary.get(
+                            "skipped_facts"
+                        ),
                         **total_metrics,
                     }
                 )
@@ -386,12 +451,33 @@ def main() -> None:
                         {
                             "prompt_file": str(job.prompt_path),
                             "database_path": str(database_path),
+                            "backend": args.backend,
+                            "closure_policy": closure_policy,
+                            "closure_radius": (
+                                args.closure_radius
+                                if args.closure is not None
+                                else None
+                            ),
                             "state": state.value,
+                            "del_off_mode": del_off_mode,
                             **metrics_by_state[state.value],
                         }
                     )
 
                 logger.print("Cross-state audit metrics:")
+                logger.print(f"  Closure policy: {closure_policy}")
+                if del_off_mode is not None:
+                    logger.print(f"  DEL-OFF control mode: {del_off_mode}")
+                if coverage_summary:
+                    logger.print(
+                        "  Verified-support coverage: "
+                        f"{coverage_summary['audited_facts']}/"
+                        f"{coverage_summary['facts']} facts"
+                    )
+                    for reason, skipped_count in coverage_summary.get(
+                        "skipped_by_reason", {}
+                    ).items():
+                        logger.print(f"    {skipped_count}x {reason}")
                 logger.print(f"  Paired count: {total_metrics['paired_count']}")
                 logger.print(
                     "  FULL-correct paired count: "
@@ -403,6 +489,14 @@ def main() -> None:
                 logger.print(
                     "  Retrieval-mediated correctness R(f): "
                     f"{total_metrics['retrieval_mediated_correctness']:.3f}"
+                )
+                logger.print(
+                    "  Retrieval interference I(f): "
+                    f"{total_metrics['retrieval_interference']:.3f}"
+                )
+                logger.print(
+                    "  Retrieval interference | FULL correct: "
+                    f"{total_metrics['retrieval_interference_given_full']:.3f}"
                 )
                 logger.print(
                     f"  Retrieval artifact rate: {total_metrics['retrieval_artifact_rate']:.3f}"

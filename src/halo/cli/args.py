@@ -89,7 +89,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help=(
             "Comma-separated deletion-closure predicates materialized from the "
-            "FULL pass: any of geometric, semantic, provenance."
+            "FULL pass: any of geometric, value, provenance. The legacy name "
+            "semantic is accepted as an alias for value."
         ),
     )
     closure.add_argument(
@@ -102,7 +103,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--closure-envelope-k",
         type=int,
         default=500,
-        help="Candidates fetched for the semantic/provenance closure envelope.",
+        help="Candidates fetched for the value/provenance closure envelope.",
     )
     closure.add_argument(
         "--closure-max-size",
@@ -140,6 +141,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=20,
         help="Maximum neighbors per fact in the entanglement sweep.",
+    )
+    closure.add_argument(
+        "--neighbor-min-count",
+        type=int,
+        default=5,
+        help=(
+            "Minimum cosine neighbors per eligible target. If fewer entries "
+            "meet --neighbor-ball, fill from the nearest remaining targets so "
+            "G(f) is not dominated by empty neighbor sets."
+        ),
     )
     closure.add_argument(
         "--reuse-canary-rate",

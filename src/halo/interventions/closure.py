@@ -19,7 +19,8 @@ from halo.interventions.filtering import (
 )
 from halo.core.examples import AuditExample, DeletionManifest
 
-VALID_PREDICATES = ("geometric", "semantic", "provenance")
+VALID_PREDICATES = ("geometric", "value", "provenance")
+_PREDICATE_ALIASES = {"semantic": "value"}
 
 
 @dataclass(frozen=True)
@@ -30,7 +31,14 @@ class ClosureConfig:
     max_closure_size: int = 10_000
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "predicates", tuple(dict.fromkeys(self.predicates)))
+        # ``semantic`` is retained as a compatibility alias for value matching.
+        predicates = tuple(
+            dict.fromkeys(
+                _PREDICATE_ALIASES.get(predicate, predicate)
+                for predicate in self.predicates
+            )
+        )
+        object.__setattr__(self, "predicates", predicates)
         unknown = [
             predicate
             for predicate in self.predicates
@@ -102,11 +110,11 @@ class ClosureResult:
             "entry_counts": entry_counts,
             "index_nprobe": self.index_nprobe,
         }
-        if self.config.is_active("semantic"):
+        if self.config.is_active("value"):
             # The run-time backstop must judge candidates against the target
             # fact's answer — not the answer of whichever prompt happens to
             # run under this manifest (neighbor prompts in a sweep).
-            metadata["semantic_target"] = {
+            metadata["value_target"] = {
                 "ground_truth": self.target_answer,
                 "object_aliases": list(self.target_aliases),
             }
@@ -189,7 +197,7 @@ def build_closure_family(
     """Closures at several radii from a single index search.
 
     Geometric closure sets are nested as the radius shrinks, so one search at
-    the smallest radius yields per-radius membership by score; semantic,
+    the smallest radius yields per-radius membership by score; value,
     provenance, and oracle members are radius-independent.
     """
     if not radii:
@@ -199,10 +207,10 @@ def build_closure_family(
         if not -1.0 <= radius <= 1.0:
             raise ValueError("radius must be a cosine similarity in [-1, 1].")
 
-    needs_search = config.is_active("geometric") or config.is_active("semantic")
+    needs_search = config.is_active("geometric") or config.is_active("value")
     if needs_search and query_vector is None:
         raise ValueError(
-            "Geometric/semantic closure predicates need the FULL query "
+            "Geometric/value closure predicates need the FULL query "
             "embedding, but none was captured for this fact."
         )
 
@@ -251,7 +259,7 @@ def build_closure_family(
         last_score = min(scores) if scores else None
 
     envelope: list[Any] = []
-    if config.is_active("semantic"):
+    if config.is_active("value"):
         envelope = _flatten_single_query(
             index.search(
                 query,
@@ -261,7 +269,7 @@ def build_closure_family(
         )
         for candidate in envelope:
             if dict(support_judge(candidate, example)).get("supports_target"):
-                note(shared_caught, candidate, "semantic")
+                note(shared_caught, candidate, "value")
 
     source_ids = (
         tuple(dict.fromkeys(str(value) for value in seed_source_ids))

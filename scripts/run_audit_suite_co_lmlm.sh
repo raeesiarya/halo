@@ -23,7 +23,8 @@
 #
 # Optional:  CO_LMLM_DIR (defaults to ../Co-LMLM next to this repo; cloned
 #            from GitHub if absent), INDEX_DIR, PROMPTS, OUTPUT_DIR,
-#            CLOSURE, RADIUS_GRID, NEIGHBOR_MODE
+#            STANDARD_CLOSURE, SWEEP_CLOSURE, ADVERSARIAL_CLOSURE,
+#            RADIUS_GRID, NEIGHBOR_MODE, NEIGHBOR_MIN_COUNT, DEL_OFF_MODE
 # Extra flags are passed through to every phase, so keep --limit consistent
 # across re-runs: the shared FULL pass is resumed wholesale and only covers
 # the facts it was built with.
@@ -46,9 +47,14 @@ case "$INDEX_DIR" in /*) ;; *) INDEX_DIR="$PWD/$INDEX_DIR" ;; esac
 case "$PROMPTS" in /*) ;; *) PROMPTS="$PWD/$PROMPTS" ;; esac
 case "$OUTPUT_DIR" in /*) ;; *) OUTPUT_DIR="$PWD/$OUTPUT_DIR" ;; esac
 
-CLOSURE="${CLOSURE:-geometric,semantic}"
+# Radius-dependent evaluations use geometric closure only.
+STANDARD_CLOSURE="${STANDARD_CLOSURE:-${CLOSURE:-geometric,value}}"
+SWEEP_CLOSURE="${SWEEP_CLOSURE:-geometric}"
+ADVERSARIAL_CLOSURE="${ADVERSARIAL_CLOSURE:-geometric}"
 RADIUS_GRID="${RADIUS_GRID:-0.95:0.70:0.05}"
 NEIGHBOR_MODE="${NEIGHBOR_MODE:-cosine}"
+NEIGHBOR_MIN_COUNT="${NEIGHBOR_MIN_COUNT:-5}"
+DEL_OFF_MODE="${DEL_OFF_MODE:-null-retrieval}"
 
 if [ ! -d "$CO_LMLM_DIR" ]; then
     echo "Co-LMLM checkout not found; cloning $CO_LMLM_REPO_URL -> $CO_LMLM_DIR"
@@ -70,19 +76,21 @@ run_audit() {
         --index-path "$INDEX_DIR" \
         --prompt-files "$PROMPTS" \
         --bootstrap-oracle-from-full \
+        --co-lmlm-del-off-mode "$DEL_OFF_MODE" \
         --wandb-activation on \
         --output-dir "$OUTPUT_DIR" \
         "$@"
 }
 
 echo "=== Phase 1/3: standard audit (L(f), R(f), probe, closure manifests) ==="
-run_audit --closure "$CLOSURE" "$@"
+run_audit --closure "$STANDARD_CLOSURE" "$@"
 
 echo "=== Phase 2/3: entanglement sweep (operating curves, G(f)) ==="
-run_audit --closure "$CLOSURE" --radius-grid "$RADIUS_GRID" \
-    --neighbor-mode "$NEIGHBOR_MODE" "$@"
+run_audit --closure "$SWEEP_CLOSURE" --radius-grid "$RADIUS_GRID" \
+    --neighbor-mode "$NEIGHBOR_MODE" \
+    --neighbor-min-count "$NEIGHBOR_MIN_COUNT" "$@"
 
 echo "=== Phase 3/3: adversarial closure (Ev, margin predictor) ==="
-run_audit --closure "$CLOSURE" --adversarial "$@"
+run_audit --closure "$ADVERSARIAL_CLOSURE" --adversarial "$@"
 
 echo "=== Audit suite complete ==="
